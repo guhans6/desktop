@@ -632,7 +632,28 @@ export class ChatGPTController {
     }
 
     let sent = false;
-    if (res?.rect?.w > 0 && res?.rect?.h > 0) {
+    if (turnState?.chatgpt) {
+      this.#throwIfStopRequested();
+      const directClicked = await this.#eval(`(() => {
+        const visible = (n) => {
+          if (!n) return false;
+          const r = n.getBoundingClientRect();
+          const style = window.getComputedStyle(n);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const disabled = (n) => !!n.disabled || String(n.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+        const exactSend = Array.from(document.querySelectorAll('button[data-testid="send-button"]'))
+          .find((n) => visible(n) && !disabled(n));
+        if (!exactSend) return false;
+        exactSend.click();
+        return true;
+      })()`).catch(() => false);
+      if (directClicked) {
+        sent = await this.#waitForSendSignal({ timeoutMs: 4000, pollMs: 120, turnState });
+      }
+    }
+
+    if (!sent && res?.rect?.w > 0 && res?.rect?.h > 0) {
       this.#throwIfStopRequested();
       const cx = Math.round(res.rect.x + res.rect.w / 2);
       const cy = Math.round(res.rect.y + res.rect.h / 2);

@@ -139,6 +139,62 @@ test('chatgpt-controller: a newly accepted ChatGPT user turn prevents fallback r
   assert.equal(events.includes('key:Enter'), false);
 });
 
+test('chatgpt-controller: ChatGPT direct send-button click is attempted before humanized mouse fallback', async () => {
+  const events = [];
+  let turnStateReads = 0;
+  let directClicked = false;
+
+  const page = {
+    async navigate() {},
+    async evaluate(js) {
+      if (js.includes('const hasTurnstile')) return readyState();
+      if (js.includes('missing_prompt_textarea')) return { ok: true, rect: { x: 10, y: 10, w: 200, h: 40 } };
+      if (js.includes("userCount: document.querySelectorAll")) {
+        turnStateReads += 1;
+        return turnStateReads === 1
+          ? { chatgpt: true, userCount: 2, assistantCount: 2 }
+          : { chatgpt: true, userCount: directClicked ? 3 : 2, assistantCount: 2 };
+      }
+      if (js.includes('const exactSend = Array.from(document.querySelectorAll')) {
+        directClicked = true;
+        events.push('directClick');
+        return true;
+      }
+      if (js.includes('already_generating')) {
+        return { ok: true, rect: { x: 300, y: 300, w: 40, h: 40 }, requestSubmit: true, host: 'chatgpt.com' };
+      }
+      if (js.includes('promptLen')) return { stopVisible: false, sendDisabled: false, promptLen: 7 };
+      throw new Error(`unexpected_eval:${js.slice(0, 80)}`);
+    },
+    async getUrl() {
+      return 'https://chatgpt.com/';
+    },
+    async sendKey() {},
+    async insertText() {},
+    async moveMouse() {},
+    async mouseDown() {
+      events.push('mouseDown');
+    },
+    async mouseUp() {},
+    async setFileInputFiles() {}
+  };
+
+  const controller = new ChatGPTController({
+    page,
+    selectors: {
+      promptTextarea: '#prompt-textarea',
+      sendButton: 'button[data-testid="send-button"]',
+      stopButton: 'button[data-testid="stop-button"]',
+      assistantMessage: '[data-message-author-role="assistant"]'
+    }
+  });
+
+  const result = await controller.send({ text: 'agentify', timeoutMs: 5_000 });
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(events, ['mouseDown', 'directClick']);
+  assert.equal(events.filter((event) => event === 'mouseDown').length, 1);
+});
+
 test('chatgpt-controller: send fails closed when more than one new ChatGPT user turn appears', async () => {
   let turnStateReads = 0;
 
