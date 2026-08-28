@@ -69,6 +69,10 @@ export function chatGptLabelMatches(value, candidates = []) {
 export function classifyChatGptModeLabel(value) {
   const label = cleanLabel(value);
   if (!label) return null;
+  // Account/profile controls can include the account's subscription tier
+  // (for example, "Guhan Pro, open profile menu"). They are not evidence of
+  // the model picker or its selected mode.
+  if (/open profile menu|accounts-profile-button/.test(label)) return null;
   const ordered = ['pro_standard', 'pro_extended', 'extra_high', 'instant', 'medium', 'high', 'pro'];
   for (const mode of ordered) {
     const labels = MODE_LABELS[mode] || [];

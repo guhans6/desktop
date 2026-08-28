@@ -317,6 +317,14 @@ export class ChatGPTController {
   async #typeHuman(text) {
     for (const ch of String(text)) {
       this.#throwIfStopRequested();
+      // ChatGPT can treat a raw newline inserted into its composer as a
+      // submission. Preserve multiline prompts with its explicit newline
+      // gesture, rather than letting one prompt become several user turns.
+      if (ch === '\n') {
+        await this.#sendKey('Enter', { modifiers: ['shift'] });
+        await sleep(jitter(25, 80));
+        continue;
+      }
       await this.page.insertText(ch);
       await sleep(jitter(12, 45));
     }
@@ -451,11 +459,13 @@ export class ChatGPTController {
       for (const n of pickerCandidates) {
         const raw = labelOf(n);
         const label = clean(raw);
+        const testId = String(n.getAttribute('data-testid') || '').toLowerCase();
+        if (testId === 'accounts-profile-button' || /open profile menu|accounts-profile-button/.test(label)) continue;
         if (/send|stop|attach|upload|voice|microphone|tools|share|copy/.test(label)) continue;
         let score = 0;
         if (/model|reason|mode/.test(label)) score += 100;
         if (known.has(label)) score += 120;
-        if (/gpt|pro|instant|medium|high/.test(label)) score += 50;
+        if (/gpt|instant|medium|high|(^|[^a-z])pro([^a-z]|$)/.test(label)) score += 50;
         if (n.getAttribute('aria-haspopup')) score += 30;
         const r = n.getBoundingClientRect();
         score += Math.max(0, 300 - r.y) / 20;
@@ -508,11 +518,13 @@ export class ChatGPTController {
       let best = -Infinity;
       for (const n of Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible)) {
         const label = clean(labelOf(n));
+        const testId = String(n.getAttribute('data-testid') || '').toLowerCase();
+        if (testId === 'accounts-profile-button' || /open profile menu|accounts-profile-button/.test(label)) continue;
         if (/send|stop|attach|upload|voice|microphone|tools|share|copy/.test(label)) continue;
         let score = 0;
         if (/model|reason|mode/.test(label)) score += 100;
         if (known.has(label)) score += 120;
-        if (/gpt|pro|instant|medium|high/.test(label)) score += 50;
+        if (/gpt|instant|medium|high|(^|[^a-z])pro([^a-z]|$)/.test(label)) score += 50;
         if (n.getAttribute('aria-haspopup')) score += 30;
         if (score > best && score >= 50) { best = score; picker = n; }
       }
@@ -554,7 +566,27 @@ export class ChatGPTController {
 
   async selectMode({ mode = 'current', timeoutMs = 5_000 } = {}) {
     const requested = normalizeChatGptMode(mode);
-    const initial = await this.#readChatGptModeSnapshot();
+    // Live ChatGPT tabs may exist in bridge metadata before the underlying
+    // browser page has completed its initial navigation. Real browser page
+    // adapters expose getUrl(); wait for provider readiness before validating
+    // the host or picker state. The composer picker hydrates independently
+    // from the prompt, so real adapters also wait for that observable mode
+    // state. Minimal unit-test adapters may omit getUrl().
+    const realPageAdapter = typeof this.page?.getUrl === 'function';
+    if (realPageAdapter) {
+      await this.ensureReady({ timeoutMs });
+    }
+    let initial = await this.#readChatGptModeSnapshot();
+    const readyForRequestedMode = (snapshot) => {
+      if (!snapshot?.chatgpt || !snapshot?.pickerFound) return false;
+      return requested !== 'current' || !!observedChatGptMode(snapshot).mode;
+    };
+    const startedAt = Date.now();
+    const waitLimit = Math.max(100, Math.min(5_000, Number(timeoutMs) || 5_000));
+    while (realPageAdapter && !readyForRequestedMode(initial) && Date.now() - startedAt < waitLimit) {
+      await sleep(100);
+      initial = await this.#readChatGptModeSnapshot();
+    }
     if (!initial?.chatgpt) {
       const error = new Error('chatgpt_mode_unavailable');
       error.data = { requested, reason: 'not_chatgpt' };
@@ -562,7 +594,20 @@ export class ChatGPTController {
     }
     const initialObserved = observedChatGptMode(initial);
     if (requested === 'current') {
-      return { requested, observed: initialObserved, verified: true, changed: false };
+      // A current-mode request is only verified when an actual mode is
+      // observable from the identified picker. Never treat an unrelated
+      // control (for example, the profile menu) or an unlabelled picker as
+      // successful mode verification.
+      if (initial?.pickerFound && initialObserved?.mode) {
+        return { requested, observed: initialObserved, verified: true, changed: false };
+      }
+      const error = new Error('chatgpt_mode_verification_failed');
+      error.data = {
+        requested,
+        reason: initial?.pickerFound ? 'current_mode_not_observable' : 'picker_not_found',
+        observed: initialObserved
+      };
+      throw error;
     }
     if (chatGptModeVerified(requested, initial)) {
       return { requested, observed: initialObserved, verified: true, changed: false };
@@ -576,10 +621,21 @@ export class ChatGPTController {
     }
 
     let menu = await this.#readChatGptModeSnapshot();
-    const optionLabels = (menu?.options || []).flatMap((item) => {
+    const labelsFromMenu = (snapshot) => (snapshot?.options || []).flatMap((item) => {
       const labels = Array.isArray(item?.labels) && item.labels.length ? item.labels : [item?.label];
       return labels.map((label) => String(label || '').trim()).filter(Boolean);
     });
+    let optionLabels = labelsFromMenu(menu);
+    const menuStartedAt = Date.now();
+    const hasHydratedOptions = (labels) => labels.some((label) => {
+      const mode = classifyChatGptModeLabel(label);
+      return mode && (mode === requested || mode !== initialObserved.mode);
+    });
+    while (realPageAdapter && !hasHydratedOptions(optionLabels) && Date.now() - menuStartedAt < waitLimit) {
+      await sleep(100);
+      menu = await this.#readChatGptModeSnapshot();
+      optionLabels = labelsFromMenu(menu);
+    }
     const directLabels = chatGptModeLabels(requested);
     const directOptionLabel = optionLabels.find((label) => classifyChatGptModeLabel(label) === requested) || null;
 
@@ -628,14 +684,14 @@ export class ChatGPTController {
       throw error;
     }
 
-    const startedAt = Date.now();
+    const verificationStartedAt = Date.now();
     let observedSnapshot = null;
     do {
       observedSnapshot = await this.#readChatGptModeSnapshot();
       if (chatGptModeVerified(requested, observedSnapshot)) {
         return { requested, observed: observedChatGptMode(observedSnapshot), verified: true, changed: true };
       }
-      if (Date.now() - startedAt >= Math.max(100, Math.min(5_000, Number(timeoutMs) || 5_000))) break;
+      if (Date.now() - verificationStartedAt >= Math.max(100, Math.min(5_000, Number(timeoutMs) || 5_000))) break;
       await sleep(100);
     } while (true);
 
