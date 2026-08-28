@@ -14,3 +14,5 @@
 - [x] Focused registry tests passed 5/5; final combined registry + HTTP lifecycle + ChatGPT regression verification passed 14/14.
 
 The new run path intentionally accepts only the prompt transport needed for this slice: it does not use caller attachments, context paths, bundles, artifact ingestion, or arbitrary page capabilities. Legacy `/query` remains unchanged until the later public-surface cutover.
+
+**Commit:** `cdf50179b0b8ab7ffab1fd6f8ff59869924594a3` (`feat: add ChatGPT run lifecycle`)
