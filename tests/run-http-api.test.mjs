@@ -106,6 +106,60 @@ test('run-http-api: delegate returns runId and run status/result follow ChatGPT 
   assert.deepEqual(result.data.result.warnings, []);
 });
 
+test('run-http-api: delegate validates mode and returns verified selection metadata', async (t) => {
+  const selections = [];
+  const controller = {
+    runExclusive: async (fn) => await fn(),
+    selectMode: async ({ mode }) => {
+      selections.push(mode);
+      return { requested: mode, observed: { mode, label: 'High', source: 'picker' }, verified: true, changed: true };
+    },
+    query: async () => ({ text: 'mode answer', codeBlocks: [], meta: {} }),
+    requestStop: async () => ({ ok: true, requested: false, clicked: false })
+  };
+  const tabs = {
+    listTabs: () => [{ id: 't-mode', key: 'mode-key', vendorId: 'chatgpt', vendorName: 'ChatGPT', url: 'https://chatgpt.com/' }],
+    ensureTab: async () => 't-mode',
+    createTab: async () => 't-mode',
+    closeTab: async () => true,
+    getControllerById: () => controller
+  };
+  const server = await startHttpApi({
+    port: 0,
+    token: 'secret',
+    tabs,
+    defaultTabId: 't-mode',
+    vendors: [{ id: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/' }],
+    serverId: 'sid-test',
+    stateDir: '/tmp',
+    getSettings: async () => settings(),
+    getStatus: async () => ({ ok: true })
+  });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const invalid = await req({ port, method: 'POST', pth: '/runs/delegate', body: { provider: 'chatgpt', key: 'mode-key', prompt: 'x', mode: 'arbitrary-dom-mode' } });
+  assert.equal(invalid.res.status, 400);
+  assert.equal(invalid.data.error, 'invalid_chatgpt_mode');
+  assert.deepEqual(selections, []);
+
+  const delegated = await req({ port, method: 'POST', pth: '/runs/delegate', body: { provider: 'chatgpt', key: 'mode-key', prompt: 'x', mode: 'high' } });
+  assert.equal(delegated.res.status, 200);
+  const runId = delegated.data.runId;
+  await eventually(async () => {
+    const status = await req({ port, method: 'GET', pth: `/runs/status?runId=${encodeURIComponent(runId)}` });
+    return status.data.state === 'completed' ? status : null;
+  });
+  const result = await req({ port, method: 'GET', pth: `/runs/result?runId=${encodeURIComponent(runId)}` });
+  assert.deepEqual(selections, ['high']);
+  assert.deepEqual(result.data.result.selection, {
+    requested: 'high',
+    observed: { mode: 'high', label: 'High', source: 'picker' },
+    verified: true,
+    changed: true
+  });
+});
+
 test('run-http-api: stop targets one active runId and records cancelled terminal state', async (t) => {
   let rejectQuery = null;
   let stopCalls = 0;

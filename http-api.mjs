@@ -9,6 +9,7 @@ import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store
 import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
 import { createRunRegistry } from './run-registry.mjs';
+import { normalizeChatGptMode } from './chatgpt-mode.mjs';
 
 function isLoopback(remoteAddress) {
   const a = String(remoteAddress || '');
@@ -75,6 +76,9 @@ function mapErrorToHttp(error) {
   if (msg === 'missing_key') return { code: 400, body: { error: 'missing_key' } };
   if (msg === 'key_too_large') return { code: 400, body: { error: 'key_too_large', data: error?.data || null } };
   if (msg === 'invalid_provider') return { code: 400, body: { error: 'invalid_provider', data: error?.data || null } };
+  if (msg === 'invalid_chatgpt_mode') return { code: 400, body: { error: 'invalid_chatgpt_mode', data: error?.data || null } };
+  if (msg === 'chatgpt_mode_unavailable') return { code: 409, body: { error: 'chatgpt_mode_unavailable', data: error?.data || null } };
+  if (msg === 'chatgpt_mode_verification_failed') return { code: 409, body: { error: 'chatgpt_mode_verification_failed', data: error?.data || null } };
   if (msg === 'missing_runId') return { code: 400, body: { error: 'missing_runId' } };
   if (msg === 'run_not_found') return { code: 404, body: { error: 'run_not_found', data: error?.data || null } };
   if (msg === 'run_not_finished') return { code: 409, body: { error: 'run_not_finished', data: error?.data || null } };
@@ -765,6 +769,7 @@ export function startHttpApi({
         const prompt = String(body.prompt || '');
         if (!prompt.trim()) throw new Error('missing_prompt');
         if (prompt.length > 200_000) throw new Error('prompt_too_large');
+        const mode = normalizeChatGptMode(body.mode ?? 'current');
         const timeoutMs = positiveIntOr(body.timeoutMs, 10 * 60_000, 30 * 60_000);
 
         const delegated = runRegistry.delegate({
@@ -812,9 +817,17 @@ export function startHttpApi({
                 return await controller.requestStop({ reason });
               });
               setState('sending');
-
-              const response = await runExclusive(controller, async () =>
-                controller.query({
+              const { selection, response } = await runExclusive(controller, async () => {
+                const selection = typeof controller?.selectMode === 'function'
+                  ? await controller.selectMode({ mode, timeoutMs: Math.min(timeoutMs, 5_000) })
+                  : mode === 'current'
+                    ? { requested: 'current', observed: null, verified: true, changed: false }
+                    : (() => {
+                        const error = new Error('chatgpt_mode_unavailable');
+                        error.data = { requested: mode, reason: 'controller_mode_adapter_unavailable' };
+                        throw error;
+                      })();
+                const response = await controller.query({
                   prompt,
                   attachments: [],
                   timeoutMs,
@@ -823,8 +836,9 @@ export function startHttpApi({
                     const nextState = runStateForProgress(patch);
                     if (nextState) setState(nextState);
                   }
-                })
-              );
+                });
+                return { selection, response };
+              });
 
               setLastOutcome(tabId, {
                 status: 'success',
@@ -839,7 +853,7 @@ export function startHttpApi({
               return {
                 rawResponse: String(response?.text || ''),
                 completion: null,
-                selection: null,
+                selection,
                 artifacts: [],
                 warnings: []
               };

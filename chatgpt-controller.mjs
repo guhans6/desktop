@@ -1,5 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {
+  chatGptLabelMatches,
+  chatGptModeLabels,
+  chatGptModeVerified,
+  classifyChatGptModeLabel,
+  normalizeChatGptMode,
+  observedChatGptMode
+} from './chatgpt-mode.mjs';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -414,6 +422,226 @@ export class ChatGPTController {
     await this.#sendKey('Backspace');
     await sleep(jitter(25, 80));
     await this.#typeHuman(prompt);
+  }
+
+  async #readChatGptModeSnapshot() {
+    return await this.#eval(`(() => {
+      const host = String(location.hostname || '').toLowerCase();
+      if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com')) {
+        return { chatgpt: false, pickerFound: false, pickerLabel: null, selectedLabels: [], options: [] };
+      }
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clean = (value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const known = new Set(['instant', 'medium', 'high', 'extra high', 'extra-high', 'pro', 'pro standard', 'pro extended', 'standard', 'extended']);
+      const fieldsOf = (n) => [
+        n?.textContent || '',
+        n?.getAttribute?.('aria-label') || '',
+        n?.getAttribute?.('title') || '',
+        n?.getAttribute?.('data-testid') || ''
+      ].map((value) => String(value || '').replace(/\\s+/g, ' ').trim()).filter(Boolean);
+      const labelOf = (n) => fieldsOf(n).join(' ');
+      const pickerCandidates = Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible);
+      let picker = null;
+      let best = -Infinity;
+      for (const n of pickerCandidates) {
+        const raw = labelOf(n);
+        const label = clean(raw);
+        if (/send|stop|attach|upload|voice|microphone|tools|share|copy/.test(label)) continue;
+        let score = 0;
+        if (/model|reason|mode/.test(label)) score += 100;
+        if (known.has(label)) score += 120;
+        if (/gpt|pro|instant|medium|high/.test(label)) score += 50;
+        if (n.getAttribute('aria-haspopup')) score += 30;
+        const r = n.getBoundingClientRect();
+        score += Math.max(0, 300 - r.y) / 20;
+        if (score > best && score >= 50) { best = score; picker = n; }
+      }
+      const optionNodes = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="radio"], [data-radix-collection-item], [data-state]'))
+        .filter(visible)
+        .slice(0, 100);
+      const options = [];
+      const selectedLabels = [];
+      const seen = new Set();
+      for (const n of optionNodes) {
+        const fields = fieldsOf(n);
+        const raw = fields.join(' ');
+        const label = raw.replace(/\\s+/g, ' ').trim();
+        if (!label) continue;
+        const normalized = clean(label);
+        if (seen.has(normalized)) continue;
+        seen.add(normalized);
+        const selected =
+          String(n.getAttribute('aria-selected') || '').toLowerCase() === 'true' ||
+          String(n.getAttribute('aria-checked') || '').toLowerCase() === 'true' ||
+          String(n.getAttribute('data-state') || '').toLowerCase() === 'checked';
+        options.push({ label, labels: fields, selected });
+        if (selected) selectedLabels.push(label);
+      }
+      return {
+        chatgpt: true,
+        pickerFound: !!picker,
+        pickerLabel: picker ? labelOf(picker) : null,
+        selectedLabels,
+        options
+      };
+    })()`);
+  }
+
+  async #openChatGptModePicker() {
+    return await this.#eval(`(() => {
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clean = (value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const known = new Set(['instant', 'medium', 'high', 'extra high', 'extra-high', 'pro', 'pro standard', 'pro extended']);
+      const labelOf = (n) => [n?.getAttribute?.('aria-label') || '', n?.getAttribute?.('title') || '', n?.getAttribute?.('data-testid') || '', n?.textContent || '']
+        .filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+      let picker = null;
+      let best = -Infinity;
+      for (const n of Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible)) {
+        const label = clean(labelOf(n));
+        if (/send|stop|attach|upload|voice|microphone|tools|share|copy/.test(label)) continue;
+        let score = 0;
+        if (/model|reason|mode/.test(label)) score += 100;
+        if (known.has(label)) score += 120;
+        if (/gpt|pro|instant|medium|high/.test(label)) score += 50;
+        if (n.getAttribute('aria-haspopup')) score += 30;
+        if (score > best && score >= 50) { best = score; picker = n; }
+      }
+      if (!picker) return { ok: false, pickerLabel: null };
+      const pickerLabel = labelOf(picker);
+      picker.click();
+      return { ok: true, pickerLabel };
+    })()`);
+  }
+
+  async #clickChatGptModeOption(labels) {
+    const allowedLabels = JSON.stringify((Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean));
+    return await this.#eval(`(() => {
+      const labels = ${allowedLabels};
+      const wanted = new Set(labels.map((value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase()));
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clean = (value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const fieldsOf = (n) => [
+        n?.textContent || '',
+        n?.getAttribute?.('aria-label') || '',
+        n?.getAttribute?.('title') || ''
+      ].map((value) => String(value || '').replace(/\\s+/g, ' ').trim()).filter(Boolean);
+      const labelOf = (n) => fieldsOf(n).join(' ');
+      const matchesWanted = (field) => wanted.has(clean(field));
+      const candidates = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="radio"], [data-radix-collection-item], button'))
+        .filter(visible);
+      const option = candidates.find((n) => fieldsOf(n).some(matchesWanted));
+      if (!option) return { clicked: false, label: null };
+      const label = labelOf(option);
+      option.click();
+      return { clicked: true, label };
+    })()`);
+  }
+
+  async selectMode({ mode = 'current', timeoutMs = 5_000 } = {}) {
+    const requested = normalizeChatGptMode(mode);
+    const initial = await this.#readChatGptModeSnapshot();
+    if (!initial?.chatgpt) {
+      const error = new Error('chatgpt_mode_unavailable');
+      error.data = { requested, reason: 'not_chatgpt' };
+      throw error;
+    }
+    const initialObserved = observedChatGptMode(initial);
+    if (requested === 'current') {
+      return { requested, observed: initialObserved, verified: true, changed: false };
+    }
+    if (chatGptModeVerified(requested, initial)) {
+      return { requested, observed: initialObserved, verified: true, changed: false };
+    }
+
+    const opened = await this.#openChatGptModePicker();
+    if (!opened?.ok) {
+      const error = new Error('chatgpt_mode_unavailable');
+      error.data = { requested, reason: 'picker_not_found', observed: initialObserved };
+      throw error;
+    }
+
+    let menu = await this.#readChatGptModeSnapshot();
+    const optionLabels = (menu?.options || []).flatMap((item) => {
+      const labels = Array.isArray(item?.labels) && item.labels.length ? item.labels : [item?.label];
+      return labels.map((label) => String(label || '').trim()).filter(Boolean);
+    });
+    const directLabels = chatGptModeLabels(requested);
+    const directOptionLabel = optionLabels.find((label) => classifyChatGptModeLabel(label) === requested) || null;
+
+    if (directOptionLabel) {
+      const clicked = await this.#clickChatGptModeOption([directOptionLabel]);
+      if (!clicked?.clicked) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'option_not_clickable', available: optionLabels };
+        throw error;
+      }
+    } else if (requested === 'pro_standard' || requested === 'pro_extended') {
+      const proOptionLabel = optionLabels.find((label) => classifyChatGptModeLabel(label) === 'pro') || null;
+      if (!proOptionLabel) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'option_missing', available: optionLabels };
+        throw error;
+      }
+      const proClicked = await this.#clickChatGptModeOption([proOptionLabel]);
+      if (!proClicked?.clicked) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'pro_not_clickable', available: optionLabels };
+        throw error;
+      }
+      await sleep(80);
+      menu = await this.#readChatGptModeSnapshot();
+      const submenuLabels = (menu?.options || []).flatMap((item) => {
+        const labels = Array.isArray(item?.labels) && item.labels.length ? item.labels : [item?.label];
+        return labels.map((label) => String(label || '').trim()).filter(Boolean);
+      });
+      const nested = chatGptModeLabels(requested, { submenu: true });
+      const nestedOptionLabel = submenuLabels.find((label) => chatGptLabelMatches(label, nested)) || null;
+      if (!nestedOptionLabel) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'pro_submode_missing', available: submenuLabels };
+        throw error;
+      }
+      const nestedClicked = await this.#clickChatGptModeOption([nestedOptionLabel]);
+      if (!nestedClicked?.clicked) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'pro_submode_not_clickable', available: submenuLabels };
+        throw error;
+      }
+    } else {
+      const error = new Error('chatgpt_mode_unavailable');
+      error.data = { requested, reason: 'option_missing', available: optionLabels };
+      throw error;
+    }
+
+    const startedAt = Date.now();
+    let observedSnapshot = null;
+    do {
+      observedSnapshot = await this.#readChatGptModeSnapshot();
+      if (chatGptModeVerified(requested, observedSnapshot)) {
+        return { requested, observed: observedChatGptMode(observedSnapshot), verified: true, changed: true };
+      }
+      if (Date.now() - startedAt >= Math.max(100, Math.min(5_000, Number(timeoutMs) || 5_000))) break;
+      await sleep(100);
+    } while (true);
+
+    const error = new Error('chatgpt_mode_verification_failed');
+    error.data = { requested, observed: observedChatGptMode(observedSnapshot || {}) };
+    throw error;
   }
 
   async #captureChatGptTurnState() {

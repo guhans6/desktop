@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ChatGPTController } from '../chatgpt-controller.mjs';
+import { chatGptLabelMatches, classifyChatGptModeLabel, observedChatGptMode } from '../chatgpt-mode.mjs';
 
 function readyState() {
   return {
@@ -22,6 +23,77 @@ function readyState() {
     }
   };
 }
+
+test('chatgpt-mode: known mode labels can be embedded in observable model-picker text without arbitrary substring matching', () => {
+  assert.equal(classifyChatGptModeLabel('GPT-5.6 · High'), 'high');
+  assert.equal(classifyChatGptModeLabel('GPT-5.6 · Extra High'), 'extra_high');
+  assert.equal(classifyChatGptModeLabel('GPT-5.6 · Pro Standard'), 'pro_standard');
+  assert.equal(chatGptLabelMatches('GPT-5.6 / Extra High', ['extra high', 'extra-high']), true);
+  assert.equal(chatGptLabelMatches('highlighted response', ['high']), false);
+  assert.deepEqual(observedChatGptMode({ pickerLabel: 'GPT-5.6 Pro', selectedLabels: ['Standard'] }), {
+    mode: 'pro_standard', label: 'Pro Standard', source: 'selected_option'
+  });
+});
+
+test('chatgpt-controller: current mode is a verified no-op using observable ChatGPT picker state', async () => {
+  const evaluations = [
+    { chatgpt: true, pickerFound: true, pickerLabel: 'High', selectedLabels: [], options: [] }
+  ];
+  const page = {
+    async evaluate() { return evaluations.shift(); }
+  };
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const selection = await controller.selectMode({ mode: 'current' });
+  assert.deepEqual(selection, {
+    requested: 'current',
+    observed: { mode: 'high', label: 'High', source: 'picker' },
+    verified: true,
+    changed: false
+  });
+  assert.equal(evaluations.length, 0);
+});
+
+test('chatgpt-controller: explicit high mode is selected only from known visible ChatGPT options and verified', async () => {
+  const evaluations = [
+    { chatgpt: true, pickerFound: true, pickerLabel: 'Medium', selectedLabels: [], options: [] },
+    { ok: true, pickerLabel: 'Medium' },
+    { chatgpt: true, pickerFound: true, pickerLabel: 'Medium', selectedLabels: [], options: [{ label: 'Medium', selected: true }, { label: 'High', selected: false }] },
+    { clicked: true, label: 'High' },
+    { chatgpt: true, pickerFound: true, pickerLabel: 'High', selectedLabels: ['High'], options: [] }
+  ];
+  const page = {
+    async evaluate() { return evaluations.shift(); }
+  };
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  const selection = await controller.selectMode({ mode: 'high', timeoutMs: 500 });
+  assert.deepEqual(selection, {
+    requested: 'high',
+    observed: { mode: 'high', label: 'High', source: 'selected_option' },
+    verified: true,
+    changed: true
+  });
+  assert.equal(evaluations.length, 0);
+});
+
+test('chatgpt-controller: unavailable explicit ChatGPT mode fails instead of substituting another option', async () => {
+  const evaluations = [
+    { chatgpt: true, pickerFound: true, pickerLabel: 'Medium', selectedLabels: [], options: [] },
+    { ok: true, pickerLabel: 'Medium' },
+    { chatgpt: true, pickerFound: true, pickerLabel: 'Medium', selectedLabels: [], options: [{ label: 'Medium', selected: true }, { label: 'High', selected: false }] }
+  ];
+  const page = {
+    async evaluate() { return evaluations.shift(); }
+  };
+  const controller = new ChatGPTController({ page, selectors: {} });
+
+  await assert.rejects(
+    () => controller.selectMode({ mode: 'extra_high', timeoutMs: 500 }),
+    (error) => error?.message === 'chatgpt_mode_unavailable' && error?.data?.requested === 'extra_high'
+  );
+  assert.equal(evaluations.length, 0);
+});
 
 test('chatgpt-controller: send falls back to requestSubmit on the active composer before Enter', async () => {
   const events = [];
