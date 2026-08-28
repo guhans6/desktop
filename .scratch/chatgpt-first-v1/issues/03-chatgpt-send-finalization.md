@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Re-establish the dependency and test baseline.
 
-**Status:** completed
+**Status:** implemented-pending-live-proof
 
 - [x] A newly created ChatGPT user turn prevents duplicate fallback sends; more than one new user turn fails closed.
 - [x] Transient ChatGPT states and stable-looking partial text are not returned as final responses.

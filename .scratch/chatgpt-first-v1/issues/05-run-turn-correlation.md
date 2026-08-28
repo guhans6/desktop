@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 — Harden ChatGPT send confirmation and finalization.
 
-**Status:** completed
+**Status:** implemented-pending-live-proof
 
 - [x] Every delegation receives a unique `runId` separate from the stable conversation key.
 - [x] Runs sharing a conversation key serialize FIFO while different keys may run concurrently subject to the existing governor.

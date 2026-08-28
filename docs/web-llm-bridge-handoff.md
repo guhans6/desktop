@@ -22,12 +22,12 @@ Claude and other existing provider implementations are not v1 targets. They may 
 
 ## Immediate frontier
 
-1. Complete and review the documentation correction.
-2. Install dependencies from the existing lockfile and rerun the full baseline suite.
-3. Make the first source-behavior slice the focused ChatGPT duplicate-send/finalization reliability work derived from upstream PR #57.
-4. Re-evaluate upstream issue #60 separately before deciding whether a direct ChatGPT send-button path is still required.
+1. Treat GitHub issue #9, the live signed-in ChatGPT compatibility gate, as the immediate priority before further UI-dependent implementation.
+2. Launch the bridge with its isolated provider profile and establish manual ChatGPT sign-in or verify truthful `needs_login` behavior.
+3. Prove one harmless real delegation end to end: exactly one user turn, current mode selection or explicit rejection, exact following assistant turn, and returned raw result.
+4. Use any live UI mismatch as the next implementation bug, add regression coverage for the observed behavior, and rerun the live smoke test before continuing output capture or public-surface work.
 
-The remaining work items and blocking edges are recorded in `web-llm-bridge-chatgpt-v1-plan.md` and mirrored under `.scratch/chatgpt-first-v1/issues/` because GitHub Issues are currently disabled on the fork.
+GitHub Issues in `guhans6/desktop` are the authoritative work tracker. Issues #1–#10 mirror the original local ticket sequence. The files under `.scratch/chatgpt-first-v1/issues/` are retained only as the migration archive and should not be treated as the primary tracker.
 
 ## Caller integration
 

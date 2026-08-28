@@ -4,7 +4,7 @@
 
 **Blocked by:** 05 — Add run lifecycle and exact turn correlation.
 
-**Status:** completed
+**Status:** implemented-pending-live-proof
 
 - [x] The public/internal mode vocabulary is constrained and ChatGPT-specific.
 - [x] Explicit selections are verified from observable UI state.
