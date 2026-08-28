@@ -416,7 +416,21 @@ export class ChatGPTController {
     await this.#typeHuman(prompt);
   }
 
-  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120 } = {}) {
+  async #captureChatGptTurnState() {
+    return await this.#eval(`(() => {
+      const host = String(location.hostname || '').toLowerCase();
+      if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com')) {
+        return { chatgpt: false, userCount: 0, assistantCount: 0 };
+      }
+      return {
+        chatgpt: true,
+        userCount: document.querySelectorAll('[data-message-author-role="user"]').length,
+        assistantCount: document.querySelectorAll('[data-message-author-role="assistant"]').length
+      };
+    })()`);
+  }
+
+  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, turnState = null } = {}) {
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const promptSel = JSON.stringify(this.selectors.promptTextarea);
@@ -458,13 +472,28 @@ export class ChatGPTController {
         return { stopVisible, sendDisabled, promptLen };
       })()`);
 
+      if (turnState?.chatgpt) {
+        const currentTurnState = await this.#captureChatGptTurnState().catch(() => null);
+        if (currentTurnState?.chatgpt) {
+          const userTurnDelta = currentTurnState.userCount - turnState.userCount;
+          if (userTurnDelta === 1) return true;
+          if (userTurnDelta > 1) {
+            const err = new Error('duplicate_user_turn_detected');
+            err.data = { baselineUserCount: turnState.userCount, currentUserCount: currentTurnState.userCount };
+            throw err;
+          }
+        }
+        await sleep(pollMs);
+        continue;
+      }
+
       if (snap?.stopVisible || snap?.sendDisabled || snap?.promptLen === 0) return true;
       await sleep(pollMs);
     }
     return false;
   }
 
-  async #clickSend() {
+  async #clickSend({ turnState = null } = {}) {
     await this.#emitProgress({ phase: 'sending_prompt' });
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const stopSel = JSON.stringify(this.selectors.stopButton);
@@ -608,7 +637,7 @@ export class ChatGPTController {
       const cx = Math.round(res.rect.x + res.rect.w / 2);
       const cy = Math.round(res.rect.y + res.rect.h / 2);
       await this.#clickAt(cx, cy);
-      sent = await this.#waitForSendSignal({ timeoutMs: 2200, pollMs: 120 });
+      sent = await this.#waitForSendSignal({ timeoutMs: turnState?.chatgpt ? 4000 : 2200, pollMs: 120, turnState });
     }
 
     if (!sent && !res?.fallbackEnter) {
@@ -653,7 +682,7 @@ export class ChatGPTController {
         }
         return false;
       })()`);
-      sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120 });
+      sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120, turnState });
     }
 
     if (!sent) {
@@ -677,7 +706,7 @@ export class ChatGPTController {
         this.#throwIfStopRequested();
         await sleep(jitter(25, 90));
         await this.#sendKey(key, { modifiers });
-        sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120 });
+        sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120, turnState });
         if (sent) break;
       }
     }
@@ -706,9 +735,11 @@ export class ChatGPTController {
     await this.page.setFileInputFiles(absFiles);
   }
 
-  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400 } = {}) {
+  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, turnState = null } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+    const correlateChatGpt = !!turnState?.chatgpt;
+    const assistantBaseline = Number(turnState?.assistantCount || 0);
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const start = Date.now();
@@ -728,13 +759,33 @@ export class ChatGPTController {
         });
         const sendEnabled = send ? !send.disabled : true;
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
-        const lastNode = nodes[nodes.length - 1];
-        const fallbackMainText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
+        const chatgptNodes = ${correlateChatGpt}
+          ? Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
+          : [];
+        const lastNode = ${correlateChatGpt}
+          ? (chatgptNodes[${assistantBaseline}] || null)
+          : nodes[nodes.length - 1];
+        const fallbackMainText = ${correlateChatGpt} ? '' : (((document.querySelector('main') || document.body)?.innerText || '').trim());
         const txt = (lastNode?.innerText || fallbackMainText).trim();
         const hasContinue = Array.from(document.querySelectorAll('button, a')).some(b => /continue generating/i.test((b.textContent||'').trim()));
         const hasRegenerate = Array.from(document.querySelectorAll('button, a')).some(b => /regenerate/i.test((b.textContent||'').trim()));
         const hasError = /something went wrong|try again|error/i.test(txt) && txt.length < 500;
-        return { stop, sendEnabled, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate };
+        const turnRoot = lastNode?.closest?.('[data-testid^="conversation-turn-"], article, section') || lastNode?.parentElement || null;
+        const hasTurnActions = !${correlateChatGpt} || !!turnRoot?.querySelector?.(
+          'button[data-testid="copy-turn-action-button"], button[data-testid*="copy-turn" i]'
+        );
+        return {
+          stop,
+          sendEnabled,
+          txt,
+          count: ${correlateChatGpt} ? chatgptNodes.length : nodes.length,
+          correlated: ${correlateChatGpt} ? !!lastNode : true,
+          usedFallback: !lastNode,
+          hasError,
+          hasContinue,
+          hasRegenerate,
+          hasTurnActions
+        };
       })()`);
 
       const txt = String(snap?.txt || '');
@@ -763,16 +814,24 @@ export class ChatGPTController {
         continue;
       }
 
-      const readyByNodes = (snap?.count || 0) > 0;
+      const readyByNodes = correlateChatGpt ? !!snap?.correlated : (snap?.count || 0) > 0;
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
+      const transientChatGpt = correlateChatGpt && txt.length < 500 && /^(thinking|working|searching|analyzing|generating|reading|browsing|using\s+(?:a\s+)?tool)(?:\b|[. …])/i.test(txt.trim());
+      const finishedTurnEvidence = !correlateChatGpt || !!snap?.hasTurnActions;
       const done =
-        (!generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
-        (!generating && fallbackStableLongEnough && (readyByNodes || fallbackWaited));
+        !transientChatGpt && finishedTurnEvidence && (
+          (!generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
+          (!generating && fallbackStableLongEnough && (readyByNodes || fallbackWaited))
+        );
       if (done) {
         const extra = await this.#eval(`(() => {
-          const nodes = Array.from(document.querySelectorAll(${assistantSel}));
-          const lastNode = nodes[nodes.length - 1];
+          const nodes = ${correlateChatGpt}
+            ? Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
+            : Array.from(document.querySelectorAll(${assistantSel}));
+          const lastNode = ${correlateChatGpt}
+            ? (nodes[${assistantBaseline}] || null)
+            : nodes[nodes.length - 1];
           const codes = Array.from(lastNode?.querySelectorAll('pre code') || []).map(c => {
             const cls = String(c.className || '');
             const lang = (cls.match(/language-([a-z0-9_-]+)/i) || [])[1] || null;
@@ -799,9 +858,10 @@ export class ChatGPTController {
     try {
       await this.ensureReady({ timeoutMs });
       await this.#attachFiles(attachments);
+      const turnState = await this.#captureChatGptTurnState().catch(() => null);
       await this.#typePrompt(prompt);
-      await this.#clickSend();
-      return await this.#waitForAssistantStable({ timeoutMs: Math.min(timeoutMs, 8 * 60_000) });
+      await this.#clickSend({ turnState });
+      return await this.#waitForAssistantStable({ timeoutMs: Math.min(timeoutMs, 8 * 60_000), turnState });
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
@@ -817,8 +877,9 @@ export class ChatGPTController {
       this.currentRun = run;
       try {
         await this.ensureReady({ timeoutMs });
+        const turnState = await this.#captureChatGptTurnState().catch(() => null);
         await this.#typePrompt(prompt);
-        await this.#clickSend();
+        await this.#clickSend({ turnState });
 
         if (stopAfterSend) {
           const start = Date.now();
