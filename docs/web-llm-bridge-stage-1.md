@@ -1,32 +1,40 @@
-# Stage 1 Plan: Minimal Web LLM Bridge
+# Stage 1 Plan: ChatGPT-First Web LLM Bridge
 
 ## Goal
 
-Prove a narrow, authenticated-browser transport loop without turning the bridge into another filesystem/context MCP:
+Prove a narrow, authenticated ChatGPT transport and delegation loop without turning the bridge into another filesystem/context MCP:
 
 ```text
-Caller -> Web LLM Bridge -> web provider -> Code MCP -> project
-       <- structured provider result <-
+Caller -> Web LLM Bridge -> ChatGPT -> established Code MCP -> project/local work
+       <- exact-turn result + bounded ChatGPT-generated outputs <-
 ```
+
+ChatGPT is the v1 provider. Gemini may follow. Existing Claude/other-provider code may remain as stale last-known-working internal implementation unless shared infrastructure requires it; the new v1 public bridge surface does not advertise those providers.
+
+The detailed contract, run lifecycle, mode contract, provider-output cache requirements, and blocking edges are defined in `web-llm-bridge-chatgpt-v1-plan.md`.
 
 ## Stage 1 sequence
 
-1. Establish this fork and document the boundary, source baseline, security constraints, and reduction map.
-2. Narrow query inputs to text-only provider transport.
-3. Remove public bundle, watch-folder, artifact, attachment, and context-path tools.
-4. Remove their implementation paths incrementally rather than with a single destructive rewrite.
-5. Restrict browser-facing APIs to provider sessions.
-6. Test text query, keyed-session reuse, status, stop/cancel, readiness, and completion metadata.
-7. Port provider compatibility fixes only after verifying the current upstream behavior.
-8. Validate an end-to-end delegated Code MCP loop.
+1. Correct the documentation boundary: allow only bounded provider-originated output capture while continuing to prohibit caller-local attachments, arbitrary paths, context packing, bundles, generic uploads, artifact ingestion, watch folders, filesystem scanning, arbitrary navigation, and generic page reads.
+2. Install dependencies from the existing lockfile and establish a fresh full-test baseline.
+3. Harden ChatGPT send confirmation and assistant-turn finalization using the narrowly relevant reliability behavior from upstream PR #57.
+4. Re-evaluate the ChatGPT send-button stall from upstream issue #60 and add a ChatGPT-specific direct send path only if it remains applicable.
+5. Add unique `runId`, per-key serialization, a long-lived run registry, exact user/assistant turn correlation, run-scoped status, and run-scoped stop.
+6. Add constrained ChatGPT mode selection and observable verification.
+7. Add versioned completion parsing and browser-session-aware per-run provider-output capture with limits, hashes, private permissions, and TTL cleanup.
+8. Expose the ChatGPT-only `delegate`, `status`, `result`, and `stop` public v1 surface; keep public-surface narrowing separate from broad internal deletion.
+9. Prove one harmless signed-in ChatGPT -> Code MCP -> caller run, including a generated temporary output artifact.
+10. Only after that proof, incrementally delete now-unreachable generic context, upload, watch, navigation/read, artifact-ingestion, and orchestration paths.
 
-## Non-goals in this initial documentation baseline
+## Non-goals in the current phase
 
-- Broad source deletion or a new independent implementation.
+- Broad source deletion or a new independent implementation before the ChatGPT loop is proven.
+- Reworking Claude or other providers for v1.
+- Caller-local attachments, arbitrary caller paths, caller-chosen output directories, or generic artifact reuse/ingestion.
 - A final product name, distribution strategy, or trademark decision.
-- CAPTCHA bypass, browser-profile sharing, or general browser automation.
-- Treating a provider's `completed` result as independent proof that project work is correct.
+- CAPTCHA bypass, browser-profile sharing, automatic approval of consequential tool confirmations, or general browser automation.
+- Treating provider transport completion as independent proof that delegated project work is correct.
 
-## First implementation change
+## Immediate implementation frontier
 
-The smallest, highest-leverage source change is to rewrite the public MCP `query` schema in `mcp-server.mjs` to accept only `provider`, `key`, and text `prompt`, while returning a clear validation error for attachment/context inputs. Keep internal code untouched in that commit; follow-up commits remove unreachable routes and modules.
+The first two executable items are documentation correction and fresh baseline verification. The first source-behavior change after that baseline is the focused ChatGPT duplicate-send/finalization reliability slice. Do not begin broad public-surface or module deletion before these prerequisites are verified.

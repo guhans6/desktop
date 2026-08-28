@@ -1,19 +1,31 @@
 # Completion Contract
 
-Provider text completion is a transport lifecycle signal, not proof that delegated project work is correct. The caller remains responsible for acceptance.
+ChatGPT transport completion is a lifecycle signal, not proof that delegated project work is correct. The caller remains responsible for acceptance.
 
-Delegated provider prompts should require a final machine-readable record, for example:
+## Exact-turn completion
 
-```json
-{
-  "bridge_status": "completed",
-  "summary": "Short description of what was done",
-  "verification": ["tests/build/checks performed"],
-  "remaining": [],
-  "needs_human": false
-}
+The bridge captures pre-send turn state, confirms the newly accepted user turn, binds the `runId` to the following assistant turn, waits until that turn is finalized, and extracts response text and outputs only from that turn. For ChatGPT, generic page text is not a valid completion fallback.
+
+Active generation, login, CAPTCHA, and tool-confirmation states are not completion. Login, CAPTCHA, and consequential tool confirmations remain manual handoffs.
+
+## Versioned final block
+
+Delegated ChatGPT prompts should require a versioned final machine-readable block with an unambiguous sentinel, for example:
+
+```text
+WEB_LLM_BRIDGE_COMPLETION_V1
+{"bridge_status":"completed","summary":"Short description of what was done","verification":["tests/build/checks performed"],"remaining":[],"needs_human":false}
+END_WEB_LLM_BRIDGE_COMPLETION_V1
 ```
 
 Allowed `bridge_status` values are `completed`, `blocked`, `needs_input`, and `failed`.
 
-The bridge should eventually return both the raw provider response and parsed completion metadata. A caller may use that information to continue, request clarification, seek human attention, or independently verify the work.
+The parser treats the versioned block as metadata embedded in the finalized assistant response. It does not search arbitrary JSON objects elsewhere in the response and must tolerate ordinary prose/code before the final block.
+
+## Result semantics
+
+A finalized run returns both the raw assistant response and parsed completion metadata. Successful transport, successful completion parsing, and caller acceptance are three distinct states.
+
+If the assistant turn finalizes but the completion block is missing or malformed, the transport result remains `completed`, `rawResponse` is retained, `completion` is `null`, and `warnings` records `completion_contract_missing` or `completion_contract_invalid`. Parsing failure alone is not rewritten into a generic transport failure.
+
+When `outputPolicy` is `capture`, the same run result may also include metadata and private cache paths for ChatGPT-generated files/images correlated to that exact assistant turn. A caller may use the raw response, completion metadata, artifacts, and warnings to continue, request clarification, seek human attention, or independently verify the work.
