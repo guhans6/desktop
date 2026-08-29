@@ -7,6 +7,12 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const PROVIDER_FILE_CONTROL_PATTERN = /(?:^download(?:\s|$)|\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)(?:\s|$))/i;
+
+export function looksLikeProviderFileControlLabel(value) {
+  return PROVIDER_FILE_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
+}
+
 function modifierMask(modifiers = []) {
   let mask = 0;
   for (const modifier of modifiers) {
@@ -481,7 +487,14 @@ class ChromeCdpPageAdapter {
         const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
         const root = roots[${turnIndex}] || null;
         if (!root) return 0;
-        const buttons = Array.from(root.querySelectorAll('button')).filter((button) => /^download(?:\\s|$)/i.test(String(button.getAttribute('aria-label') || button.textContent || '').trim()));
+        const buttons = Array.from(root.querySelectorAll('button')).filter((button) => {
+          const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+          return ${PROVIDER_FILE_CONTROL_PATTERN}.test(label);
+        });
         for (const button of buttons.slice(0, ${itemCap})) button.click();
         return buttons.length;
       })()`);

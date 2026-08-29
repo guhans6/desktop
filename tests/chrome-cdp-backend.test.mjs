@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-import { ChromeCdpBrowserBackend, ChromeCdpConnection, chromeSpawnOptions } from '../chrome-cdp-backend.mjs';
+import { ChromeCdpBrowserBackend, ChromeCdpConnection, chromeSpawnOptions, looksLikeProviderFileControlLabel } from '../chrome-cdp-backend.mjs';
 
 class MockWebSocket {
   constructor() {
@@ -82,6 +82,14 @@ test('chrome-cdp-backend: pending commands reject when websocket closes', async 
   ws.close();
 
   await assert.rejects(async () => await pending, /chrome_cdp_disconnected/);
+});
+
+test('chrome-cdp-backend: exact-turn file controls recognize generated filenames without matching unrelated buttons', () => {
+  assert.equal(looksLikeProviderFileControlLabel('bridge-check-note.txt'), true);
+  assert.equal(looksLikeProviderFileControlLabel('Download file'), true);
+  assert.equal(looksLikeProviderFileControlLabel('report.pdf'), true);
+  assert.equal(looksLikeProviderFileControlLabel('Coding Citation'), false);
+  assert.equal(looksLikeProviderFileControlLabel('Copy'), false);
 });
 
 test('chrome-cdp-backend: Chrome spawn does not use shell on any platform', () => {
