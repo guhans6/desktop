@@ -21,3 +21,4 @@ The present Stage 1 baseline is documentation only. Preserve MPL-2.0 notices and
 - Keep login and CAPTCHA resolution as a manual handoff; never add bypass behavior.
 - Treat provider generation completion as distinct from task acceptance. Return raw text plus parsed completion metadata.
 - Use ordinary human-style prompts for behavioral and signed-in live verification. Keep synthetic sentinels/markers only in protocol fixtures where that format is itself under test, and never count the provider's self-reported success claims as verification evidence.
+- When visible provider UI state is part of a live/browser acceptance claim, preserve a focused screenshot of the relevant exact-turn state before teardown and record it with the run evidence. Do not require screenshots for pure unit/protocol tests unless rendering itself is under test.

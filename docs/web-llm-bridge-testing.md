@@ -18,6 +18,8 @@ Assertions should observe bridge behavior directly: the prompt is forwarded unch
 
 ### Signed-in live verification
 
+When visible provider UI state is part of a live/browser acceptance claim, preserve one focused screenshot of the relevant exact-turn state before teardown and record its path with the run evidence. The screenshot is supporting evidence alongside DOM/API/cache evidence, not a substitute for machine-verifiable assertions. Unit and pure protocol tests do not need screenshots unless rendering itself is the subject under test.
+
 Live acceptance uses a normal request a person could reasonably send in ChatGPT. For provider-output capture, ask for a simple file in ordinary language, for example:
 
 > Please make a small text note called `bridge-check-note.txt` containing the sentence “The bridge check finished successfully.” Attach the file here when it is ready, then give me a short confirmation.
