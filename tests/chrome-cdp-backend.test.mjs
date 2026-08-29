@@ -9,7 +9,8 @@ import {
   ChromeCdpConnection,
   chromeSpawnOptions,
   looksLikeGenericDownloadControlLabel,
-  looksLikeProviderFileControlLabel
+  looksLikeProviderFileControlLabel,
+  preferredProviderDownloadName
 } from '../chrome-cdp-backend.mjs';
 
 class MockWebSocket {
@@ -103,6 +104,12 @@ test('chrome-cdp-backend: preview fallback recognizes generic Download controls 
   assert.equal(looksLikeGenericDownloadControlLabel('Download file'), true);
   assert.equal(looksLikeGenericDownloadControlLabel('bridge-check-note.txt'), false);
   assert.equal(looksLikeGenericDownloadControlLabel('Coding Citation'), false);
+});
+
+test('chrome-cdp-backend: exact-turn filename wins over a collision-suffixed browser suggestion', () => {
+  assert.equal(preferredProviderDownloadName('bridge-check-note.txt', 'bridge-check-note(4).txt'), 'bridge-check-note.txt');
+  assert.equal(preferredProviderDownloadName('Download file', 'report.pdf'), 'report.pdf');
+  assert.equal(preferredProviderDownloadName('', ''), null);
 });
 
 test('chrome-cdp-backend: Chrome spawn does not use shell on any platform', () => {

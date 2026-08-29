@@ -8,6 +8,7 @@ function sleep(ms) {
 }
 
 const PROVIDER_FILE_CONTROL_PATTERN = /(?:^download(?:\s|$)|\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)(?:\s|$))/i;
+const PROVIDER_FILENAME_CONTROL_PATTERN = /\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)(?:\s|$)/i;
 
 export function looksLikeProviderFileControlLabel(value) {
   return PROVIDER_FILE_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
@@ -17,6 +18,12 @@ const GENERIC_DOWNLOAD_CONTROL_PATTERN = /^download(?:\s|$)/i;
 
 export function looksLikeGenericDownloadControlLabel(value) {
   return GENERIC_DOWNLOAD_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
+}
+
+export function preferredProviderDownloadName(controlLabel, suggestedFilename) {
+  const label = String(controlLabel || '').replace(/\s+/g, ' ').trim();
+  const suggested = String(suggestedFilename || '').replace(/\s+/g, ' ').trim();
+  return PROVIDER_FILENAME_CONTROL_PATTERN.test(label) ? label : suggested || null;
 }
 
 function modifierMask(modifiers = []) {
@@ -481,7 +488,7 @@ class ChromeCdpPageAdapter {
         downloadPath: stagingDir,
         eventsEnabled: true
       });
-      const triggerCount = await this.evaluate(`(() => {
+      const trigger = await this.evaluate(`(() => {
         const marker = 'data-web-llm-bridge-preexisting-download';
         const visible = (node) => {
           const rect = node?.getBoundingClientRect?.();
@@ -497,7 +504,7 @@ class ChromeCdpPageAdapter {
         }
         const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
         const root = roots[${turnIndex}] || null;
-        if (!root) return 0;
+        if (!root) return { count: 0, names: [] };
         const buttons = Array.from(root.querySelectorAll('button')).filter((button) => {
           const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
             .filter(Boolean)
@@ -506,9 +513,19 @@ class ChromeCdpPageAdapter {
             .trim();
           return ${PROVIDER_FILE_CONTROL_PATTERN}.test(label);
         });
-        for (const button of buttons.slice(0, ${itemCap})) button.click();
-        return buttons.length;
+        const selected = buttons.slice(0, ${itemCap});
+        const names = selected.map((button) => [
+          button.getAttribute('aria-label'),
+          button.getAttribute('title'),
+          button.textContent
+        ]
+          .map((value) => String(value || '').replace(/\s+/g, ' ').trim())
+          .find((value) => ${PROVIDER_FILENAME_CONTROL_PATTERN}.test(value)) || null);
+        for (const button of selected) button.click();
+        return { count: buttons.length, names };
       })()`);
+      const triggerCount = Number(trigger?.count || 0);
+      const preferredNames = Array.isArray(trigger?.names) ? trigger.names : [];
       if (Number(triggerCount) > 0) {
         const fallbackStartedAt = Date.now();
         while (Date.now() - fallbackStartedAt < Math.min(waitMs, 2_500) && downloads.size === 0) {
@@ -583,7 +600,7 @@ class ChromeCdpPageAdapter {
       const items = [];
       const warnings = [];
       let aggregateBytes = 0;
-      for (const download of [...downloads.values()].filter((item) => item.state === 'completed').slice(0, itemCap)) {
+      for (const [downloadIndex, download] of [...downloads.values()].filter((item) => item.state === 'completed').slice(0, itemCap).entries()) {
         const filePath = path.join(stagingDir, download.guid);
         try {
           const stat = await fs.stat(filePath);
@@ -597,7 +614,13 @@ class ChromeCdpPageAdapter {
           }
           const data = await fs.readFile(filePath);
           aggregateBytes += stat.size;
-          items.push({ kind: 'file', name: download.name, mime: 'application/octet-stream', size: stat.size, dataBase64: data.toString('base64') });
+          items.push({
+            kind: 'file',
+            name: preferredProviderDownloadName(preferredNames[downloadIndex], download.name),
+            mime: 'application/octet-stream',
+            size: stat.size,
+            dataBase64: data.toString('base64')
+          });
         } catch {
           warnings.push('artifact_capture_failed');
         }
