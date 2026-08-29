@@ -8,7 +8,7 @@ function sleep(ms) {
 }
 
 const PROVIDER_FILE_CONTROL_PATTERN = /(?:^download(?:\s|$)|\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)(?:\s|$))/i;
-const PROVIDER_FILENAME_CONTROL_PATTERN = /\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)(?:\s|$)/i;
+const PROVIDER_FILENAME_CONTROL_PATTERN = /\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)$/i;
 
 export function looksLikeProviderFileControlLabel(value) {
   return PROVIDER_FILE_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
@@ -22,8 +22,9 @@ export function looksLikeGenericDownloadControlLabel(value) {
 
 export function preferredProviderDownloadName(controlLabel, suggestedFilename) {
   const label = String(controlLabel || '').replace(/\s+/g, ' ').trim();
+  const filename = label.replace(/^(?:attach|download)\s+/i, '').trim();
   const suggested = String(suggestedFilename || '').replace(/\s+/g, ' ').trim();
-  return PROVIDER_FILENAME_CONTROL_PATTERN.test(label) ? label : suggested || null;
+  return PROVIDER_FILENAME_CONTROL_PATTERN.test(filename) ? filename : suggested || null;
 }
 
 function modifierMask(modifiers = []) {
@@ -494,7 +495,7 @@ class ChromeCdpPageAdapter {
           const rect = node?.getBoundingClientRect?.();
           return !!rect && rect.width > 0 && rect.height > 0;
         };
-        for (const button of Array.from(document.querySelectorAll('button')).filter(visible)) {
+        for (const button of Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible)) {
           const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
             .filter(Boolean)
             .join(' ')
@@ -505,7 +506,7 @@ class ChromeCdpPageAdapter {
         const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
         const root = roots[${turnIndex}] || null;
         if (!root) return { count: 0, names: [] };
-        const buttons = Array.from(root.querySelectorAll('button')).filter((button) => {
+        const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).filter((button) => {
           const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
             .filter(Boolean)
             .join(' ')
@@ -535,7 +536,7 @@ class ChromeCdpPageAdapter {
               const rect = node?.getBoundingClientRect?.();
               return !!rect && rect.width > 0 && rect.height > 0;
             };
-            const buttons = Array.from(document.querySelectorAll('button'))
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
               .filter(visible)
               .filter((button) => !button.hasAttribute(marker))
               .filter((button) => {
@@ -558,7 +559,7 @@ class ChromeCdpPageAdapter {
                 const rect = node?.getBoundingClientRect?.();
                 return !!rect && rect.width > 0 && rect.height > 0;
               };
-              const button = Array.from(document.querySelectorAll('button'))
+              const button = Array.from(document.querySelectorAll('button, [role="button"]'))
                 .filter(visible)
                 .filter((node) => !node.hasAttribute(marker))
                 .find((node) => {

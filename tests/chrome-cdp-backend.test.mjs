@@ -108,6 +108,7 @@ test('chrome-cdp-backend: preview fallback recognizes generic Download controls 
 
 test('chrome-cdp-backend: exact-turn filename wins over a collision-suffixed browser suggestion', () => {
   assert.equal(preferredProviderDownloadName('bridge-check-note.txt', 'bridge-check-note(4).txt'), 'bridge-check-note.txt');
+  assert.equal(preferredProviderDownloadName('Attach bridge-check-note.txt', 'bridge-check-note(5).txt'), 'bridge-check-note.txt');
   assert.equal(preferredProviderDownloadName('Download file', 'report.pdf'), 'report.pdf');
   assert.equal(preferredProviderDownloadName('', ''), null);
 });
