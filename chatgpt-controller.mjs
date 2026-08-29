@@ -1144,7 +1144,15 @@ export class ChatGPTController {
           }).filter(c => c.text);
           return { codeBlocks: codes };
         })()`);
-        return { text: txt, codeBlocks: extra?.codeBlocks || [], meta: { count: snap?.count || 0, hasError: !!snap?.hasError } };
+        return {
+          text: txt,
+          codeBlocks: extra?.codeBlocks || [],
+          meta: {
+            count: snap?.count || 0,
+            hasError: !!snap?.hasError,
+            assistantTurnIndex: correlateChatGpt ? assistantBaseline : null
+          }
+        };
       }
 
       await sleep(pollMs);
@@ -1201,6 +1209,121 @@ export class ChatGPTController {
         if (this.currentRun === run) this.currentRun = null;
       }
     });
+  }
+
+  async captureAssistantOutputs({
+    assistantTurnIndex,
+    maxItems = 8,
+    maxBytesPerItem = 8 * 1024 * 1024,
+    maxAggregateBytes = 20 * 1024 * 1024
+  } = {}) {
+    const turnIndex = Number(assistantTurnIndex);
+    if (!Number.isInteger(turnIndex) || turnIndex < 0) {
+      const error = new Error('missing_assistant_turn_index');
+      error.data = { assistantTurnIndex };
+      throw error;
+    }
+    const itemCap = Math.max(1, Math.min(12, Math.floor(Number(maxItems) || 8)));
+    const perItemCap = Math.max(1, Math.min(12 * 1024 * 1024, Math.floor(Number(maxBytesPerItem) || 8 * 1024 * 1024)));
+    const aggregateCap = Math.max(perItemCap, Math.min(32 * 1024 * 1024, Math.floor(Number(maxAggregateBytes) || 20 * 1024 * 1024)));
+    const browserCaptured = typeof this.page?.captureAssistantDownloads === 'function'
+      ? await this.page.captureAssistantDownloads({
+        assistantTurnIndex: turnIndex,
+        maxItems: itemCap,
+        maxBytesPerItem: perItemCap,
+        maxAggregateBytes: aggregateCap
+      })
+      : { items: [], warnings: [] };
+    const out = await this.#eval(`(async () => {
+      const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+      const root = nodes[${turnIndex}] || null;
+      if (!root) return { items: [], warnings: ['artifact_exact_turn_missing'] };
+      const maxItems = ${itemCap};
+      const maxBytesPerItem = ${perItemCap};
+      const maxAggregateBytes = ${aggregateCap};
+      const warnings = [];
+      const candidates = [];
+      const seen = new Set();
+      const add = (item) => {
+        const source = String(item?.source || '').trim();
+        if (!source || seen.has(source) || candidates.length >= maxItems) return;
+        if (!/^(?:https:|blob:|data:)/i.test(source)) return;
+        seen.add(source);
+        candidates.push({ ...item, source });
+      };
+      const cleanName = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      for (const a of Array.from(root.querySelectorAll('a[href], a[download]'))) {
+        if (candidates.length >= maxItems) break;
+        const source = String(a.href || a.getAttribute('href') || '').trim();
+        const download = cleanName(a.getAttribute('download'));
+        const text = cleanName(a.textContent);
+        const title = cleanName(a.getAttribute('title'));
+        const aria = cleanName(a.getAttribute('aria-label'));
+        const hint = download || text || title || aria;
+        let pathname = '';
+        try { pathname = new URL(source, location.href).pathname || ''; } catch {}
+        const looksFile = !!download || /(?:download|export|attachment|file|image|pdf|csv|json|zip|txt|markdown|document|spreadsheet|presentation)/i.test(hint) || /\.(?:png|jpe?g|webp|gif|avif|pdf|csv|json|zip|txt|md|docx?|xlsx?|pptx?)(?:$|[?#])/i.test(pathname);
+        if (looksFile) add({ kind: 'file', source, name: hint || null });
+      }
+      for (const img of Array.from(root.querySelectorAll('img'))) {
+        if (candidates.length >= maxItems) break;
+        const rect = img.getBoundingClientRect();
+        if (rect.width < 64 || rect.height < 64) continue;
+        const source = String(img.currentSrc || img.src || '').trim();
+        add({ kind: 'image', source, name: cleanName(img.alt) || null });
+      }
+
+      const items = [];
+      let aggregateBytes = 0;
+      for (const candidate of candidates) {
+        try {
+          const response = await fetch(candidate.source, { credentials: 'include' });
+          if (!response.ok && /^https:/i.test(candidate.source)) {
+            warnings.push('artifact_capture_failed');
+            continue;
+          }
+          const blob = await response.blob();
+          const size = Number(blob.size || 0);
+          if (size <= 0) continue;
+          if (size > maxBytesPerItem) {
+            warnings.push('artifact_per_file_limit');
+            continue;
+          }
+          if (aggregateBytes + size > maxAggregateBytes) {
+            warnings.push('artifact_aggregate_limit');
+            break;
+          }
+          const mime = String(blob.type || response.headers?.get?.('content-type') || '').split(';')[0].trim().toLowerCase() || 'application/octet-stream';
+          if (mime === 'text/html' || mime === 'application/xhtml+xml') {
+            warnings.push('artifact_html_rejected');
+            continue;
+          }
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('file_reader_error'));
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.readAsDataURL(blob);
+          });
+          const comma = dataUrl.indexOf(',');
+          if (comma < 0) {
+            warnings.push('artifact_capture_failed');
+            continue;
+          }
+          aggregateBytes += size;
+          items.push({ kind: candidate.kind, name: candidate.name || null, mime, size, dataBase64: dataUrl.slice(comma + 1) });
+        } catch {
+          warnings.push('artifact_capture_failed');
+        }
+      }
+      return { items, warnings: Array.from(new Set(warnings)) };
+    })()`);
+    return {
+      items: [...(Array.isArray(browserCaptured?.items) ? browserCaptured.items : []), ...(Array.isArray(out?.items) ? out.items : [])].slice(0, itemCap),
+      warnings: [...new Set([
+        ...(Array.isArray(browserCaptured?.warnings) ? browserCaptured.warnings.map(String) : []),
+        ...(Array.isArray(out?.warnings) ? out.warnings.map(String) : [])
+      ])]
+    };
   }
 
   async getLastAssistantImages({ maxImages = 6 } = {}) {

@@ -217,6 +217,31 @@ test('chatgpt-controller: unavailable explicit ChatGPT mode fails instead of sub
   assert.equal(evaluations.length, 0);
 });
 
+test('chatgpt-controller: provider output capture is scoped to the exact finalized assistant turn index', async () => {
+  const discoveries = [];
+  const page = {
+    async captureAssistantDownloads(options) {
+      discoveries.push(options);
+      return {
+        items: [{ kind: 'file', name: 'report.txt', mime: 'text/plain', size: 3, dataBase64: 'YWJj' }],
+        warnings: []
+      };
+    },
+    async evaluate(js) {
+      assert.match(js, /nodes\[3\]/);
+      assert.match(js, /credentials: 'include'/);
+      return { items: [], warnings: [] };
+    }
+  };
+  const controller = new ChatGPTController({ page, selectors: {} });
+  const captured = await controller.captureAssistantOutputs({ assistantTurnIndex: 3, maxItems: 2, maxBytesPerItem: 1024, maxAggregateBytes: 2048 });
+  assert.deepEqual(captured, {
+    items: [{ kind: 'file', name: 'report.txt', mime: 'text/plain', size: 3, dataBase64: 'YWJj' }],
+    warnings: []
+  });
+  assert.deepEqual(discoveries, [{ assistantTurnIndex: 3, maxItems: 2, maxBytesPerItem: 1024, maxAggregateBytes: 2048 }]);
+});
+
 test('chatgpt-controller: send falls back to requestSubmit on the active composer before Enter', async () => {
   const events = [];
   let waitForSendChecks = 0;

@@ -298,11 +298,12 @@ export class ChromeCdpConnection {
 }
 
 class ChromeCdpPageAdapter {
-  constructor({ client, targetId, sessionId, windowId = null }) {
+  constructor({ client, targetId, sessionId, windowId = null, stateDir = null }) {
     this.client = client;
     this.targetId = targetId;
     this.sessionId = sessionId;
     this.windowId = windowId;
+    this.stateDir = stateDir;
     this.closed = false;
     this.minimized = false;
   }
@@ -431,6 +432,97 @@ class ChromeCdpPageAdapter {
     const err = new Error('missing_file_input');
     err.data = { selector: 'input[type=file]', found: lastNodeIds.length };
     throw err;
+  }
+
+  async captureAssistantDownloads({
+    assistantTurnIndex,
+    maxItems = 8,
+    maxBytesPerItem = 8 * 1024 * 1024,
+    maxAggregateBytes = 20 * 1024 * 1024,
+    timeoutMs = 5_000
+  } = {}) {
+    const turnIndex = Number(assistantTurnIndex);
+    if (!Number.isInteger(turnIndex) || turnIndex < 0 || !this.stateDir) return { items: [], warnings: [] };
+    const itemCap = Math.max(1, Math.min(12, Math.floor(Number(maxItems) || 8)));
+    const perItemCap = Math.max(1, Math.floor(Number(maxBytesPerItem) || 8 * 1024 * 1024));
+    const aggregateCap = Math.max(perItemCap, Math.floor(Number(maxAggregateBytes) || 20 * 1024 * 1024));
+    const waitMs = Math.max(500, Math.min(10_000, Math.floor(Number(timeoutMs) || 5_000)));
+    await fs.mkdir(this.stateDir, { recursive: true, mode: 0o700 });
+    const stagingDir = await fs.mkdtemp(path.join(this.stateDir, 'download-capture-'));
+    const downloads = new Map();
+    const offBegin = this.client.on('Browser.downloadWillBegin', (params) => {
+      if (downloads.size >= itemCap) return;
+      downloads.set(String(params?.guid || ''), {
+        guid: String(params?.guid || ''),
+        name: String(params?.suggestedFilename || '').trim() || null,
+        state: 'inProgress'
+      });
+    });
+    const offProgress = this.client.on('Browser.downloadProgress', (params) => {
+      const item = downloads.get(String(params?.guid || ''));
+      if (item) item.state = String(params?.state || item.state);
+    });
+
+    try {
+      await this.client.send('Browser.setDownloadBehavior', {
+        behavior: 'allowAndName',
+        downloadPath: stagingDir,
+        eventsEnabled: true
+      });
+      await this.evaluate(`(() => {
+        const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+        const root = roots[${turnIndex}] || null;
+        if (!root) return 0;
+        const buttons = Array.from(root.querySelectorAll('button')).filter((button) => /^download(?:\\s|$)/i.test(String(button.getAttribute('aria-label') || button.textContent || '').trim()));
+        for (const button of buttons.slice(0, ${itemCap})) button.click();
+        return buttons.length;
+      })()`);
+      await sleep(150);
+      await this.evaluate(`(() => {
+        const visible = (node) => {
+          const rect = node?.getBoundingClientRect?.();
+          return !!rect && rect.width > 0 && rect.height > 0;
+        };
+        const buttons = Array.from(document.querySelectorAll('button[aria-label="Download file"], button[aria-label="Download"]')).filter(visible);
+        for (const button of buttons.slice(0, ${itemCap})) button.click();
+        return buttons.length;
+      })()`);
+
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < waitMs && ![...downloads.values()].some((item) => item.state === 'completed')) {
+        await sleep(100);
+      }
+
+      const items = [];
+      const warnings = [];
+      let aggregateBytes = 0;
+      for (const download of [...downloads.values()].filter((item) => item.state === 'completed').slice(0, itemCap)) {
+        const filePath = path.join(stagingDir, download.guid);
+        try {
+          const stat = await fs.stat(filePath);
+          if (stat.size > perItemCap) {
+            warnings.push('artifact_per_file_limit');
+            continue;
+          }
+          if (aggregateBytes + stat.size > aggregateCap) {
+            warnings.push('artifact_aggregate_limit');
+            break;
+          }
+          const data = await fs.readFile(filePath);
+          aggregateBytes += stat.size;
+          items.push({ kind: 'file', name: download.name, mime: 'application/octet-stream', size: stat.size, dataBase64: data.toString('base64') });
+        } catch {
+          warnings.push('artifact_capture_failed');
+        }
+      }
+      if (downloads.size && !items.length && !warnings.length) warnings.push('artifact_capture_failed');
+      return { items, warnings: [...new Set(warnings)] };
+    } finally {
+      offBegin();
+      offProgress();
+      await this.client.send('Browser.setDownloadBehavior', { behavior: 'default' }).catch(() => {});
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   async bringToFront() {
@@ -652,7 +744,7 @@ export class ChromeCdpBrowserBackend {
         if (browserWindow && Number.isFinite(browserWindow.windowId)) windowId = browserWindow.windowId;
       } catch {}
 
-      const page = new ChromeCdpPageAdapter({ client: this.client, targetId, sessionId, windowId });
+      const page = new ChromeCdpPageAdapter({ client: this.client, targetId, sessionId, windowId, stateDir: this.stateDir });
       await page.initialize({ userAgent: this.userAgent });
       if (show) await page.bringToFront().catch(() => {});
       else await page.minimize().catch(() => {});
