@@ -498,7 +498,7 @@ class ChromeCdpPageAdapter {
             .filter((button) => !button.hasAttribute(marker))
           : [];
         for (const button of buttons.slice(0, ${itemCap})) button.click();
-        for (const button of document.querySelectorAll(`[${marker}]`)) button.removeAttribute(marker);
+        for (const button of document.querySelectorAll('[data-web-llm-bridge-preexisting-download]')) button.removeAttribute(marker);
         return buttons.length;
       })()`);
 
