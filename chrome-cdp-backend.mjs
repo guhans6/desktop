@@ -529,13 +529,11 @@ class ChromeCdpPageAdapter {
                   .trim();
                 return ${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label);
               });
-            for (const button of buttons.slice(0, ${itemCap})) {
-              button.setAttribute(marker, '1');
-              button.click();
-            }
-            return buttons.length;
+            const button = buttons[0] || null;
+            if (button) button.click();
+            return button ? 1 : 0;
           })()`);
-          await sleep(Number(clickedFallback) > 0 ? 150 : 100);
+          await sleep(Number(clickedFallback) > 0 ? 350 : 100);
         }
       }
       await this.evaluate(`(() => {
