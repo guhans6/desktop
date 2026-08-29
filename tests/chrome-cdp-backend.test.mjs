@@ -10,7 +10,8 @@ import {
   chromeSpawnOptions,
   looksLikeGenericDownloadControlLabel,
   looksLikeProviderFileControlLabel,
-  preferredProviderDownloadName
+  preferredProviderDownloadName,
+  providerDownloadMatches
 } from '../chrome-cdp-backend.mjs';
 
 class MockWebSocket {
@@ -111,6 +112,13 @@ test('chrome-cdp-backend: exact-turn filename wins over a collision-suffixed bro
   assert.equal(preferredProviderDownloadName('Attach bridge-check-note.txt', 'bridge-check-note(5).txt'), 'bridge-check-note.txt');
   assert.equal(preferredProviderDownloadName('Download file', 'report.pdf'), 'report.pdf');
   assert.equal(preferredProviderDownloadName('', ''), null);
+});
+
+test('chrome-cdp-backend: provider download events must match the exact-turn filename', () => {
+  assert.equal(providerDownloadMatches(['bridge-check-note.txt'], 'bridge-check-note.txt'), true);
+  assert.equal(providerDownloadMatches(['bridge-check-note.txt'], 'bridge-check-note(4).txt'), true);
+  assert.equal(providerDownloadMatches(['bridge-check-note.txt'], 'unrelated-report.pdf'), false);
+  assert.equal(providerDownloadMatches([], 'bridge-check-note.txt'), false);
 });
 
 test('chrome-cdp-backend: Chrome spawn does not use shell on any platform', () => {

@@ -7,7 +7,6 @@ import {
   createBrowserBackend,
   resolveChromeDebugPort,
   resolveChromeExecutablePath,
-  resolveChromeProfileMode,
   resolveChromeProfileName
 } from './browser-backend.mjs';
 import { ChatGPTController } from './chatgpt-controller.mjs';
@@ -95,7 +94,7 @@ export async function startBridgeRuntime({
       onChanged: () => {},
       chromeExecutablePath: resolveChromeExecutablePath({ argv, env, settings }),
       chromeDebugPort: resolveChromeDebugPort({ argv, env, settings }),
-      chromeProfileMode: resolveChromeProfileMode({ argv, env, settings }),
+      chromeProfileMode: 'isolated',
       chromeProfileName: resolveChromeProfileName({ argv, env, settings })
     });
     const browserState = await browserBackend.start();
@@ -147,6 +146,11 @@ export async function startBridgeRuntime({
           defaultTabId,
           serverId,
           stateDir,
+          governor: {
+            maxQueuedPerKey: settings.maxInflightQueries,
+            maxQueriesPerMinute: settings.maxQueriesPerMinute,
+            minRunGapMs: Math.max(settings.minTabGapMs, settings.minGlobalGapMs)
+          },
           onShutdown: stop
         });
         selectedPort = server.address().port;

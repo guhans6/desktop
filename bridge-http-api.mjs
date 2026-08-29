@@ -45,6 +45,21 @@ function boundedTimeout(value, fallback = 10 * 60_000) {
   return Math.min(number, 30 * 60_000);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function runStateForProgress(patch) {
+  const blockedKind = String(patch?.blockedKind || '').trim();
+  const phase = String(patch?.phase || '').trim();
+  if (patch?.blocked && blockedKind === 'login') return 'needs_login';
+  if (patch?.blocked && blockedKind === 'captcha') return 'needs_captcha';
+  if (blockedKind === 'tool_confirmation' || phase === 'awaiting_tool_confirmation') return 'needs_tool_confirmation';
+  if (phase === 'waiting_for_response' || phase === 'working') return 'working';
+  if (['waiting_for_ready', 'typing_prompt', 'sending_prompt'].includes(phase)) return 'sending';
+  return null;
+}
+
 function errorResponse(error) {
   const message = String(error?.message || error);
   if (message === 'body_too_large') return [413, { error: message }];
@@ -57,6 +72,7 @@ function errorResponse(error) {
   }
   if (message === 'run_not_finished') return [409, { error: message, data: error?.data || null }];
   if (message === 'run_not_found') return [404, { error: message, data: error?.data || null }];
+  if (message === 'run_queue_full') return [429, { error: message, data: error?.data || null }];
   if (message === 'chatgpt_mode_unavailable' || message === 'chatgpt_mode_verification_failed') {
     return [409, { error: message, data: error?.data || null }];
   }
@@ -75,9 +91,33 @@ export function startBridgeHttpApi({
   defaultTabId,
   serverId,
   stateDir,
+  governor = {},
   onShutdown
 } = {}) {
-  const runs = createRunRegistry({ provider: 'chatgpt' });
+  const runs = createRunRegistry({ provider: 'chatgpt', maxQueuedPerKey: governor.maxQueuedPerKey });
+  const maxQueriesPerMinute = Math.max(1, Math.min(600, Math.floor(Number(governor.maxQueriesPerMinute) || 12)));
+  const configuredRunGap = Number(governor.minRunGapMs);
+  const minRunGapMs = Math.max(0, Math.min(60_000, Number.isFinite(configuredRunGap) ? Math.floor(configuredRunGap) : 1_200));
+  const recentRunStarts = [];
+  let lastRunStartedAt = 0;
+  const waitForRunBudget = async (isStopRequested) => {
+    while (true) {
+      if (isStopRequested?.()) throw new Error('query_aborted');
+      const now = Date.now();
+      while (recentRunStarts.length && recentRunStarts[0] <= now - 60_000) recentRunStarts.shift();
+      const gapWait = Math.max(0, minRunGapMs - (now - lastRunStartedAt));
+      const qpmWait = recentRunStarts.length >= maxQueriesPerMinute
+        ? Math.max(0, recentRunStarts[0] + 60_000 - now)
+        : 0;
+      const waitMs = Math.max(gapWait, qpmWait);
+      if (waitMs <= 0) {
+        lastRunStartedAt = now;
+        recentRunStarts.push(now);
+        return;
+      }
+      await sleep(Math.min(waitMs, 250));
+    }
+  };
 
   const server = http.createServer(async (request, response) => {
     try {
@@ -91,8 +131,8 @@ export function startBridgeHttpApi({
       if (url.pathname === '/status' && request.method === 'GET') {
         const controller = tabs.getControllerById(defaultTabId);
         const [urlValue, challenge] = await Promise.all([
-          controller.getUrl().catch(() => ''),
-          controller.detectChallenge().catch(() => null)
+          controller.getUrl(),
+          controller.detectChallenge()
         ]);
         return sendJson(response, 200, {
           ok: true,
@@ -142,18 +182,24 @@ export function startBridgeHttpApi({
         const delegated = runs.delegate({
           provider,
           key,
-          execute: async ({ runId, setState, setStopHandler }) => {
+          execute: async ({ runId, setState, setStopHandler, isStopRequested }) => {
             const controller = tabs.getControllerById(defaultTabId);
             await setStopHandler(async ({ reason }) => await controller.requestStop({ reason }));
+            await waitForRunBudget(isStopRequested);
+            const onProgress = (patch) => {
+              const nextState = runStateForProgress(patch);
+              if (nextState) setState(nextState);
+            };
             setState('sending');
+            if (typeof controller.ensureReady === 'function') {
+              await controller.ensureReady({ timeoutMs, onProgress });
+            }
             const selection = await controller.selectMode({ mode, timeoutMs: Math.min(timeoutMs, 5_000) });
             const response = await controller.query({
               prompt,
               attachments: [],
               timeoutMs,
-              onProgress: ({ phase }) => {
-                if (phase === 'waiting_for_response') setState('working');
-              }
+              onProgress
             });
             const rawResponse = String(response?.text || '');
             const parsedCompletion = parseCompletionContract(rawResponse);

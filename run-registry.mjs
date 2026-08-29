@@ -43,10 +43,11 @@ function publicRun(run) {
 }
 
 export class RunRegistry {
-  constructor({ idFactory = () => crypto.randomUUID(), now = () => Date.now(), schedule = queueMicrotask } = {}) {
+  constructor({ idFactory = () => crypto.randomUUID(), now = () => Date.now(), schedule = queueMicrotask, maxQueuedPerKey = 12 } = {}) {
     this.idFactory = idFactory;
     this.now = now;
     this.schedule = schedule;
+    this.maxQueuedPerKey = Math.max(1, Math.min(100, Math.floor(Number(maxQueuedPerKey) || 12)));
     this.runs = new Map();
     this.queues = new Map();
     this.activeKeys = new Set();
@@ -59,6 +60,10 @@ export class RunRegistry {
     if (!normalizedKey) throw runError('missing_key');
     if (normalizedKey.length > 240) throw runError('key_too_large');
     if (typeof execute !== 'function') throw runError('missing_run_executor');
+    const queue = this.queues.get(normalizedKey) || [];
+    if (queue.length >= this.maxQueuedPerKey) {
+      throw runError('run_queue_full', { key: normalizedKey, maxQueuedPerKey: this.maxQueuedPerKey });
+    }
 
     const now = this.now();
     const run = {
@@ -81,7 +86,6 @@ export class RunRegistry {
     };
 
     this.runs.set(run.runId, run);
-    const queue = this.queues.get(normalizedKey) || [];
     queue.push(run.runId);
     this.queues.set(normalizedKey, queue);
     this.#scheduleDrain(normalizedKey);

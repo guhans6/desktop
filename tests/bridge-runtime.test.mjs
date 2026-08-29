@@ -45,15 +45,25 @@ test('bridge-runtime: starts Chrome-CDP provider runtime without Electron lifecy
     stateDir: '/tmp/bridge-runtime-test',
     port: 57546,
     showTabs: true,
-    argv: ['node', 'bridge-main.mjs'],
-    env: {},
+    argv: ['node', 'bridge-main.mjs', '--chrome-profile-mode', 'existing'],
+    env: { AGENTIFY_DESKTOP_CHROME_PROFILE_MODE: 'existing' },
     registerSignals: false,
     dependencies: {
       ensureToken: async () => 'token',
-      readSettings: async () => ({ browserBackend: 'electron', chromeDebugPort: 9222, chromeProfileMode: 'isolated', chromeProfileName: 'Default' }),
+      readSettings: async () => ({
+        browserBackend: 'electron',
+        chromeDebugPort: 9222,
+        chromeProfileMode: 'existing',
+        chromeProfileName: 'Default',
+        maxInflightQueries: 2,
+        maxQueriesPerMinute: 12,
+        minTabGapMs: 1_200,
+        minGlobalGapMs: 200
+      }),
       loadSelectors: async () => ({}),
       loadVendors: async () => [{ id: 'chatgpt', name: 'ChatGPT', url: 'https://chatgpt.com/', status: 'supported' }],
       createBrowserBackend: async (options) => {
+        assert.equal(options.chromeProfileMode, 'isolated');
         calls.push(['backend', options.kind]);
         return browserBackend;
       },
@@ -74,6 +84,7 @@ test('bridge-runtime: starts Chrome-CDP provider runtime without Electron lifecy
   assert.equal(runtime.tabs.listTabs()[0].protectedTab, true);
   assert.equal(capturedApi.vendors, undefined);
   assert.equal(capturedApi.stateDir, '/tmp/bridge-runtime-test');
+  assert.deepEqual(capturedApi.governor, { maxQueuedPerKey: 2, maxQueriesPerMinute: 12, minRunGapMs: 1_200 });
   assert.equal(written[0].runtime, 'headless');
 
   assert.equal(capturedApi.defaultTabId, runtime.defaultTabId);

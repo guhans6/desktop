@@ -27,6 +27,19 @@ export function preferredProviderDownloadName(controlLabel, suggestedFilename) {
   return PROVIDER_FILENAME_CONTROL_PATTERN.test(filename) ? filename : suggested || null;
 }
 
+function normalizedProviderDownloadName(value) {
+  return path.basename(String(value || '').replace(/\s+/g, ' ').trim())
+    .replace(/\s*\(\d+\)(?=\.[^.]+$)/, '')
+    .toLowerCase();
+}
+
+export function providerDownloadMatches(expectedNames, suggestedFilename) {
+  const suggested = normalizedProviderDownloadName(suggestedFilename);
+  if (!suggested) return false;
+  return (Array.isArray(expectedNames) ? expectedNames : [])
+    .some((name) => normalizedProviderDownloadName(name) === suggested);
+}
+
 function modifierMask(modifiers = []) {
   let mask = 0;
   for (const modifier of modifiers) {
@@ -469,9 +482,21 @@ class ChromeCdpPageAdapter {
     const waitMs = Math.max(500, Math.min(10_000, Math.floor(Number(timeoutMs) || 5_000)));
     await fs.mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     const stagingDir = await fs.mkdtemp(path.join(this.stateDir, 'download-capture-'));
+    const frameTree = await this.client.send('Page.getFrameTree', {}, this.sessionId);
+    const allowedFrameIds = new Set();
+    const collectFrameIds = (node) => {
+      const frameId = String(node?.frame?.id || '').trim();
+      if (frameId) allowedFrameIds.add(frameId);
+      for (const child of Array.isArray(node?.childFrames) ? node.childFrames : []) collectFrameIds(child);
+    };
+    collectFrameIds(frameTree?.frameTree);
     const downloads = new Map();
-    const offBegin = this.client.on('Browser.downloadWillBegin', (params) => {
-      if (downloads.size >= itemCap) return;
+    let expectedDownloadNames = [];
+    const offBegin = this.client.on('Browser.downloadWillBegin', (params, eventSessionId) => {
+      if (eventSessionId && eventSessionId !== this.sessionId) return;
+      if (!allowedFrameIds.has(String(params?.frameId || ''))) return;
+      if (expectedDownloadNames.length && !providerDownloadMatches(expectedDownloadNames, params?.suggestedFilename)) return;
+      if (downloads.size >= itemCap * 4) return;
       downloads.set(String(params?.guid || ''), {
         guid: String(params?.guid || ''),
         name: String(params?.suggestedFilename || '').trim() || null,
@@ -527,14 +552,40 @@ class ChromeCdpPageAdapter {
       })()`);
       const triggerCount = Number(trigger?.count || 0);
       const preferredNames = Array.isArray(trigger?.names) ? trigger.names : [];
+      const expectedPreviewNames = preferredNames
+        .map((name) => preferredProviderDownloadName(name, null))
+        .filter(Boolean);
+      expectedDownloadNames = expectedPreviewNames;
+      for (const [guid, download] of downloads) {
+        if (!providerDownloadMatches(expectedDownloadNames, download.name)) downloads.delete(guid);
+      }
       if (Number(triggerCount) > 0) {
         const fallbackStartedAt = Date.now();
         while (Date.now() - fallbackStartedAt < Math.min(waitMs, 2_500) && downloads.size === 0) {
-          const clickedFallback = await this.evaluate(`(() => {
+          const target = await this.evaluate(`(() => {
             const marker = 'data-web-llm-bridge-preexisting-download';
+            const expectedNames = ${JSON.stringify(expectedPreviewNames)};
             const visible = (node) => {
               const rect = node?.getBoundingClientRect?.();
               return !!rect && rect.width > 0 && rect.height > 0;
+            };
+            const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+            const turnRoot = roots[${turnIndex}] || null;
+            if (!turnRoot || expectedNames.length === 0) return null;
+            const previewNames = Array.from(document.querySelectorAll('[aria-label], [title]'))
+              .filter(visible)
+              .filter((node) => !turnRoot.contains(node))
+              .filter((node) => [node.getAttribute('aria-label'), node.getAttribute('title')]
+                .map((value) => clean(value).replace(/^(?:attach|download)\\s+/i, '').trim())
+                .some((value) => expectedNames.includes(value)));
+            const commonAncestor = (left, right) => {
+              const ancestors = new Set();
+              for (let node = left; node; node = node.parentElement) ancestors.add(node);
+              for (let node = right; node; node = node.parentElement) {
+                if (ancestors.has(node)) return node;
+              }
+              return null;
             };
             const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
               .filter(visible)
@@ -547,45 +598,32 @@ class ChromeCdpPageAdapter {
                   .trim();
                 return ${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label);
               });
-            const button = buttons[0] || null;
-            if (button) button.click();
-            return button ? 1 : 0;
-          })()`);
-          await sleep(Number(clickedFallback) > 0 ? 350 : 100);
-          if (Number(clickedFallback) > 0 && downloads.size === 0) {
-            const target = await this.evaluate(`(() => {
-              const marker = 'data-web-llm-bridge-preexisting-download';
-              const visible = (node) => {
-                const rect = node?.getBoundingClientRect?.();
-                return !!rect && rect.width > 0 && rect.height > 0;
-              };
-              const button = Array.from(document.querySelectorAll('button, [role="button"]'))
-                .filter(visible)
-                .filter((node) => !node.hasAttribute(marker))
-                .find((node) => {
-                  const label = [node.getAttribute('aria-label'), node.getAttribute('title'), node.textContent]
-                    .filter(Boolean)
-                    .join(' ')
-                    .replace(/\\s+/g, ' ')
-                    .trim();
-                  return ${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label);
-                });
-              if (!button) return null;
-              const rect = button.getBoundingClientRect();
-              return {
-                x: rect.x + rect.width / 2,
-                y: rect.y + rect.height / 2,
-                width: rect.width,
-                height: rect.height
-              };
-            })()`);
-            if (target?.width > 0 && target?.height > 0) {
-              await this.moveMouse(target.x, target.y);
-              await this.mouseDown(target.x, target.y, { button: 'left', clickCount: 1 });
-              await sleep(30);
-              await this.mouseUp(target.x, target.y, { button: 'left', clickCount: 1 });
-              await sleep(150);
+            for (const button of buttons) {
+              for (const nameNode of previewNames) {
+                const scope = commonAncestor(button, nameNode);
+                if (!scope || scope === document.body || scope === document.documentElement || scope.contains(turnRoot)) continue;
+                const scopeRect = scope.getBoundingClientRect?.();
+                if (!scopeRect || scopeRect.width <= 0 || scopeRect.height <= 0) continue;
+                if (scopeRect.width * scopeRect.height > innerWidth * innerHeight * 0.8) continue;
+                const rect = button.getBoundingClientRect();
+                return {
+                  x: rect.x + rect.width / 2,
+                  y: rect.y + rect.height / 2,
+                  width: rect.width,
+                  height: rect.height
+                };
+              }
             }
+            return null;
+          })()`);
+          if (target?.width > 0 && target?.height > 0) {
+            await this.moveMouse(target.x, target.y);
+            await this.mouseDown(target.x, target.y, { button: 'left', clickCount: 1 });
+            await sleep(30);
+            await this.mouseUp(target.x, target.y, { button: 'left', clickCount: 1 });
+            await sleep(350);
+          } else {
+            await sleep(100);
           }
         }
       }

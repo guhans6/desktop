@@ -236,15 +236,23 @@ export class ChatGPTController {
     throw err;
   }
 
-  async ensureReady({ timeoutMs = 10 * 60_000 } = {}) {
-    await this.#emitProgress({ phase: 'waiting_for_ready', blocked: false, blockedKind: null, blockedTitle: null });
-    const st = await this.detectChallenge().catch(() => null);
-    if (st?.blocked) {
-      await this.#enterBlockedState(st);
+  async ensureReady({ timeoutMs = 10 * 60_000, onProgress = null } = {}) {
+    const progressRun = !this.currentRun && typeof onProgress === 'function'
+      ? { kind: 'readiness', requested: false, requestedAt: null, reason: null, onProgress }
+      : null;
+    if (progressRun) this.currentRun = progressRun;
+    try {
+      await this.#emitProgress({ phase: 'waiting_for_ready', blocked: false, blockedKind: null, blockedTitle: null });
+      const st = await this.detectChallenge().catch(() => null);
+      if (st?.blocked) {
+        await this.#enterBlockedState(st);
+      }
+      const ready = await this.waitForPromptVisible({ timeoutMs });
+      await this.#exitBlockedStateIfNeeded();
+      return ready;
+    } finally {
+      if (this.currentRun === progressRun) this.currentRun = null;
     }
-    const ready = await this.waitForPromptVisible({ timeoutMs });
-    await this.#exitBlockedStateIfNeeded();
-    return ready;
   }
 
   async #enterBlockedState(st) {

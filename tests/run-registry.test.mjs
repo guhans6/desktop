@@ -31,6 +31,16 @@ test('run-registry: v1 rejects non-ChatGPT providers', () => {
   );
 });
 
+test('run-registry: bounds queued runs per key', () => {
+  const registry = createRunRegistry({ maxQueuedPerKey: 2, schedule: () => {} });
+  registry.delegate({ key: 'bounded', execute: async () => ({}) });
+  registry.delegate({ key: 'bounded', execute: async () => ({}) });
+  assert.throws(
+    () => registry.delegate({ key: 'bounded', execute: async () => ({}) }),
+    (error) => error?.message === 'run_queue_full' && error?.data?.maxQueuedPerKey === 2
+  );
+});
+
 test('run-registry: same-key runs serialize while different keys can run concurrently', async () => {
   const registry = createRunRegistry();
   const firstGate = deferred();

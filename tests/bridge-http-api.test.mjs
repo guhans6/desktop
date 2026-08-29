@@ -94,6 +94,97 @@ test('bridge HTTP API is ChatGPT-default-only and rejects inherited desktop rout
   assert.equal(result.body.result.selection.verified, true);
 });
 
+test('bridge HTTP API fails closed when provider readiness cannot be inspected', async (t) => {
+  const token = 'bridge-status-failure-token';
+  const controller = {
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async detectChallenge() { throw new Error('provider_inspection_failed'); }
+  };
+  const defaultTab = { id: 'default-tab', key: 'default', protectedTab: true, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+  const tabs = { getControllerById: () => controller, listTabs: () => [defaultTab] };
+  const server = await startBridgeHttpApi({ port: 0, token, tabs, defaultTabId: defaultTab.id });
+  t.after(() => server.close());
+
+  const status = await request(server.address().port, '/status', { token });
+  assert.deepEqual(status, { status: 500, body: { error: 'internal_error' } });
+});
+
+test('bridge HTTP API reports manual login handoff while readiness is blocked', async (t) => {
+  const token = 'bridge-login-handoff-token';
+  let releaseReady;
+  const ready = new Promise((resolve) => { releaseReady = resolve; });
+  const controller = {
+    async getUrl() { return 'https://chatgpt.com/auth/login'; },
+    async detectChallenge() { return { blocked: true, promptVisible: false, kind: 'login', indicators: {} }; },
+    async requestStop() { return { ok: true }; },
+    async ensureReady({ onProgress }) {
+      onProgress({ phase: 'awaiting_user', blocked: true, blockedKind: 'login' });
+      await ready;
+    },
+    async selectMode({ mode }) { return { requested: mode, observed: { mode: 'high', label: 'High', source: 'picker' }, verified: true, changed: false }; },
+    async query() { return { text: 'Ready after sign-in.' }; }
+  };
+  const defaultTab = { id: 'default-tab', key: 'default', protectedTab: true, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+  const tabs = { getControllerById: () => controller, listTabs: () => [defaultTab] };
+  const server = await startBridgeHttpApi({ port: 0, token, tabs, defaultTabId: defaultTab.id, governor: { minRunGapMs: 0 } });
+  t.after(() => server.close());
+
+  const delegated = await request(server.address().port, '/runs/delegate', {
+    method: 'POST', token, body: { prompt: 'Please summarize the current bridge status.' }
+  });
+  let status;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    status = await request(server.address().port, `/runs/status?runId=${encodeURIComponent(delegated.body.runId)}`, { token });
+    if (status.body.state === 'needs_login') break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(status.body.state, 'needs_login');
+
+  releaseReady();
+  let result;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    result = await request(server.address().port, `/runs/result?runId=${encodeURIComponent(delegated.body.runId)}`, { token });
+    if (result.status === 200) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(result.body.state, 'completed');
+});
+
+test('bridge HTTP API preserves a conservative gap between provider runs', async (t) => {
+  const token = 'bridge-pacing-token';
+  const startedAt = [];
+  const controller = {
+    async requestStop() { return { ok: true }; },
+    async selectMode({ mode }) { return { requested: mode, observed: { mode: 'high', label: 'High', source: 'picker' }, verified: true, changed: false }; },
+    async query() { startedAt.push(Date.now()); return { text: 'Done.' }; }
+  };
+  const defaultTab = { id: 'default-tab', key: 'default', protectedTab: true, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+  const tabs = { getControllerById: () => controller, listTabs: () => [defaultTab] };
+  const server = await startBridgeHttpApi({
+    port: 0,
+    token,
+    tabs,
+    defaultTabId: defaultTab.id,
+    governor: { minRunGapMs: 40, maxQueriesPerMinute: 100 }
+  });
+  t.after(() => server.close());
+
+  for (let index = 0; index < 2; index += 1) {
+    const delegated = await request(server.address().port, '/runs/delegate', {
+      method: 'POST', token, body: { prompt: `Please summarize bridge run ${index + 1}.` }
+    });
+    let result;
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      result = await request(server.address().port, `/runs/result?runId=${encodeURIComponent(delegated.body.runId)}`, { token });
+      if (result.status === 200) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(result.body.state, 'completed');
+  }
+  assert.equal(startedAt.length, 2);
+  assert.ok(startedAt[1] - startedAt[0] >= 35, startedAt.join(','));
+});
+
 test('bridge HTTP API preserves final completion metadata and caches only exact-turn provider outputs', async (t) => {
   const token = 'bridge-output-token';
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-http-api-output-'));
