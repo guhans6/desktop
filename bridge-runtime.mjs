@@ -146,6 +146,7 @@ export async function startBridgeRuntime({
           tabs,
           defaultTabId,
           serverId,
+          stateDir,
           onShutdown: stop
         });
         selectedPort = server.address().port;

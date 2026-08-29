@@ -73,7 +73,7 @@ test('bridge-runtime: starts Chrome-CDP provider runtime without Electron lifecy
   assert.equal(runtime.tabs.listTabs()[0].key, 'default');
   assert.equal(runtime.tabs.listTabs()[0].protectedTab, true);
   assert.equal(capturedApi.vendors, undefined);
-  assert.equal(capturedApi.stateDir, undefined);
+  assert.equal(capturedApi.stateDir, '/tmp/bridge-runtime-test');
   assert.equal(written[0].runtime, 'headless');
 
   assert.equal(capturedApi.defaultTabId, runtime.defaultTabId);

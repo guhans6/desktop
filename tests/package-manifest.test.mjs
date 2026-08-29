@@ -21,6 +21,8 @@ test('package manifest is publishable under @agentify/desktop with npx-friendly 
   assert.ok(manifest.files.includes('bridge-runtime.mjs'));
   assert.ok(manifest.files.includes('bridge-main.mjs'));
   assert.ok(manifest.files.includes('bridge-http-api.mjs'));
+  assert.ok(manifest.files.includes('completion-contract.mjs'));
+  assert.ok(manifest.files.includes('run-output-cache.mjs'));
   assert.ok(manifest.files.includes('main.mjs'));
   assert.ok(manifest.files.includes('docs/'));
   assert.ok(manifest.files.includes('mcp-server.mjs'));

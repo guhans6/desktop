@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { startBridgeHttpApi } from '../bridge-http-api.mjs';
 
@@ -62,6 +65,12 @@ test('bridge HTTP API is ChatGPT-default-only and rejects inherited desktop rout
   assert.equal(invalidTab.status, 400);
   assert.equal(invalidTab.body.error, 'invalid_bridge_tab');
 
+  const invalidOutputPolicy = await request(port, '/runs/delegate', {
+    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'x', outputPolicy: 'path' }
+  });
+  assert.equal(invalidOutputPolicy.status, 400);
+  assert.equal(invalidOutputPolicy.body.error, 'invalid_output_policy');
+
   const delegated = await request(port, '/runs/delegate', {
     method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'x', mode: 'current' }
   });
@@ -80,5 +89,135 @@ test('bridge HTTP API is ChatGPT-default-only and rejects inherited desktop rout
   assert.equal(result.status, 200);
   assert.equal(result.body.state, 'completed');
   assert.equal(result.body.result.rawResponse, 'response:x');
+  assert.equal(result.body.result.completion, null);
+  assert.deepEqual(result.body.result.warnings, ['completion_contract_missing']);
   assert.equal(result.body.result.selection.verified, true);
+});
+
+test('bridge HTTP API preserves final completion metadata and caches only exact-turn provider outputs', async (t) => {
+  const token = 'bridge-output-token';
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-http-api-output-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const rawResponse = [
+    'The requested output is ready.',
+    '',
+    'WEB_LLM_BRIDGE_COMPLETION_V1',
+    '{"bridge_status":"completed","summary":"done","verification":["test"],"remaining":[],"needs_human":false}',
+    'END_WEB_LLM_BRIDGE_COMPLETION_V1'
+  ].join('\n');
+  const controller = {
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async detectChallenge() { return { blocked: false, promptVisible: true, kind: null, indicators: null }; },
+    async requestStop() { return { ok: true }; },
+    async selectMode({ mode }) { return { requested: mode, observed: { mode: 'medium', label: 'Medium', source: 'picker' }, verified: true, changed: false }; },
+    async query() { return { text: rawResponse, meta: { assistantTurnIndex: 4 } }; },
+    async captureAssistantOutputs(options) {
+      assert.deepEqual(options, {
+        assistantTurnIndex: 4,
+        maxItems: 8,
+        maxBytesPerItem: 8 * 1024 * 1024,
+        maxAggregateBytes: 20 * 1024 * 1024
+      });
+      return {
+        items: [{ kind: 'file', name: '../provider-output.txt', mime: 'text/plain', dataBase64: Buffer.from('exact-turn').toString('base64') }],
+        warnings: []
+      };
+    }
+  };
+  const defaultTab = { id: 'default-tab', key: 'default', protectedTab: true, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+  const tabs = {
+    getControllerById() { return controller; },
+    listTabs() { return [defaultTab]; }
+  };
+  const server = await startBridgeHttpApi({ port: 0, token, tabs, defaultTabId: defaultTab.id, stateDir });
+  t.after(() => server.close());
+  const port = server.address().port;
+
+  const delegated = await request(port, '/runs/delegate', {
+    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'capture this', outputPolicy: 'capture' }
+  });
+  assert.equal(delegated.status, 200);
+  let result;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    result = await request(port, `/runs/result?runId=${encodeURIComponent(delegated.body.runId)}`, { token });
+    if (result.status === 200) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(result.status, 200);
+  assert.equal(result.body.result.rawResponse, rawResponse);
+  assert.deepEqual(result.body.result.completion, {
+    version: 1,
+    bridge_status: 'completed',
+    summary: 'done',
+    verification: ['test'],
+    remaining: [],
+    needs_human: false
+  });
+  assert.deepEqual(result.body.result.warnings, []);
+  assert.equal(result.body.result.artifacts.length, 1);
+  const [artifact] = result.body.result.artifacts;
+  assert.equal(artifact.name, 'provider-output.txt');
+  assert.equal(artifact.path.startsWith(path.join(stateDir, 'run-output-cache', delegated.body.runId)), true);
+  assert.equal(await fs.readFile(artifact.path, 'utf8'), 'exact-turn');
+});
+
+test('bridge HTTP API retains a completed response when optional provider-output capture fails', async (t) => {
+  const token = 'bridge-capture-failure-token';
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bridge-http-api-capture-failure-'));
+  t.after(async () => await fs.rm(stateDir, { recursive: true, force: true }));
+  const controller = {
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async detectChallenge() { return { blocked: false, promptVisible: true, kind: null, indicators: null }; },
+    async requestStop() { return { ok: true }; },
+    async selectMode({ mode }) { return { requested: mode, observed: { mode: 'medium', label: 'Medium', source: 'picker' }, verified: true, changed: false }; },
+    async query() { return { text: 'provider completed', meta: { assistantTurnIndex: 2 } }; },
+    async captureAssistantOutputs() { throw new Error('download_failed'); }
+  };
+  const defaultTab = { id: 'default-tab', key: 'default', protectedTab: true, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+  const tabs = { getControllerById: () => controller, listTabs: () => [defaultTab] };
+  const server = await startBridgeHttpApi({ port: 0, token, tabs, defaultTabId: defaultTab.id, stateDir });
+  t.after(() => server.close());
+  const delegated = await request(server.address().port, '/runs/delegate', {
+    method: 'POST', token, body: { prompt: 'capture this', outputPolicy: 'capture' }
+  });
+  let result;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    result = await request(server.address().port, `/runs/result?runId=${encodeURIComponent(delegated.body.runId)}`, { token });
+    if (result.status === 200) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(result.status, 200);
+  assert.equal(result.body.state, 'completed');
+  assert.equal(result.body.result.rawResponse, 'provider completed');
+  assert.deepEqual(result.body.result.artifacts, []);
+  assert.deepEqual(result.body.result.warnings, ['completion_contract_missing', 'artifact_capture_failed']);
+});
+
+test('bridge HTTP API acknowledges shutdown before closing the active request', async () => {
+  const token = 'bridge-shutdown-token';
+  const controller = {
+    async getUrl() { return 'https://chatgpt.com/'; },
+    async detectChallenge() { return { blocked: false, promptVisible: true, kind: null, indicators: null }; }
+  };
+  const defaultTab = { id: 'default-tab', key: 'default', protectedTab: true, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
+  const tabs = { getControllerById: () => controller, listTabs: () => [defaultTab] };
+  let server;
+  let shutdownCalled = false;
+  server = await startBridgeHttpApi({
+    port: 0,
+    token,
+    tabs,
+    defaultTabId: defaultTab.id,
+    onShutdown: async () => {
+      shutdownCalled = true;
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+  const result = await request(server.address().port, '/shutdown', { method: 'POST', token, body: {} });
+  assert.deepEqual(result, { status: 200, body: { ok: true } });
+  for (let attempt = 0; attempt < 20 && !shutdownCalled; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(shutdownCalled, true);
+  assert.equal(server.listening, false);
 });

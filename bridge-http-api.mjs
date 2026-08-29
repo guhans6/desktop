@@ -2,7 +2,9 @@ import crypto from 'node:crypto';
 import http from 'node:http';
 
 import { normalizeChatGptMode } from './chatgpt-mode.mjs';
+import { parseCompletionContract } from './completion-contract.mjs';
 import { createRunRegistry } from './run-registry.mjs';
+import { RUN_OUTPUT_LIMITS, storeRunOutputs } from './run-output-cache.mjs';
 
 function isLoopback(address) {
   const value = String(address || '');
@@ -48,7 +50,8 @@ function errorResponse(error) {
   if (message === 'body_too_large') return [413, { error: message }];
   if (
     message === 'invalid_json' || message === 'missing_prompt' || message === 'prompt_too_large' ||
-    message === 'invalid_chatgpt_mode' || message === 'invalid_provider' || message === 'invalid_bridge_tab'
+    message === 'invalid_chatgpt_mode' || message === 'invalid_provider' || message === 'invalid_bridge_tab' ||
+    message === 'invalid_output_policy'
   ) {
     return [400, { error: message, data: error?.data || null }];
   }
@@ -71,6 +74,7 @@ export function startBridgeHttpApi({
   tabs,
   defaultTabId,
   serverId,
+  stateDir,
   onShutdown
 } = {}) {
   const runs = createRunRegistry({ provider: 'chatgpt' });
@@ -128,11 +132,17 @@ export function startBridgeHttpApi({
         if (!prompt.trim()) throw new Error('missing_prompt');
         if (prompt.length > 200_000) throw new Error('prompt_too_large');
         const mode = normalizeChatGptMode(body.mode ?? 'current');
+        const outputPolicy = String(body.outputPolicy || 'none').trim().toLowerCase() || 'none';
+        if (!['none', 'capture'].includes(outputPolicy)) {
+          const error = new Error('invalid_output_policy');
+          error.data = { outputPolicy, allowed: ['none', 'capture'] };
+          throw error;
+        }
         const timeoutMs = boundedTimeout(body.timeoutMs);
         const delegated = runs.delegate({
           provider,
           key,
-          execute: async ({ setState, setStopHandler }) => {
+          execute: async ({ runId, setState, setStopHandler }) => {
             const controller = tabs.getControllerById(defaultTabId);
             await setStopHandler(async ({ reason }) => await controller.requestStop({ reason }));
             setState('sending');
@@ -145,12 +155,40 @@ export function startBridgeHttpApi({
                 if (phase === 'waiting_for_response') setState('working');
               }
             });
+            const rawResponse = String(response?.text || '');
+            const parsedCompletion = parseCompletionContract(rawResponse);
+            let storedOutputs = { artifacts: [], warnings: [] };
+            if (outputPolicy === 'capture') {
+              const assistantTurnIndex = response?.meta?.assistantTurnIndex;
+              let captured = { items: [], warnings: ['artifact_capture_unavailable'] };
+              if (typeof controller.captureAssistantOutputs === 'function' && Number.isInteger(assistantTurnIndex)) {
+                try {
+                  captured = await controller.captureAssistantOutputs({
+                    assistantTurnIndex,
+                    maxItems: RUN_OUTPUT_LIMITS.maxItems,
+                    maxBytesPerItem: RUN_OUTPUT_LIMITS.maxBytesPerItem,
+                    maxAggregateBytes: RUN_OUTPUT_LIMITS.maxAggregateBytes
+                  });
+                } catch {
+                  captured = { items: [], warnings: ['artifact_capture_failed'] };
+                }
+              }
+              if (!stateDir) {
+                storedOutputs = { artifacts: [], warnings: ['artifact_cache_unavailable'] };
+              } else {
+                try {
+                  storedOutputs = await storeRunOutputs({ stateDir, runId, captured, limits: RUN_OUTPUT_LIMITS });
+                } catch {
+                  storedOutputs = { artifacts: [], warnings: ['artifact_cache_failed'] };
+                }
+              }
+            }
             return {
-              rawResponse: String(response?.text || ''),
-              completion: null,
+              rawResponse,
+              completion: parsedCompletion.completion,
               selection,
-              artifacts: [],
-              warnings: []
+              artifacts: storedOutputs.artifacts,
+              warnings: [...new Set([...parsedCompletion.warnings, ...(storedOutputs.warnings || [])])]
             };
           }
         });
@@ -158,8 +196,11 @@ export function startBridgeHttpApi({
       }
 
       if (url.pathname === '/shutdown' && request.method === 'POST') {
-        await onShutdown?.();
-        return sendJson(response, 200, { ok: true });
+        sendJson(response, 200, { ok: true });
+        setImmediate(() => {
+          void Promise.resolve().then(() => onShutdown?.()).catch(() => {});
+        });
+        return;
       }
 
       return sendJson(response, 404, { error: 'not_found' });

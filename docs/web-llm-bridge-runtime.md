@@ -19,7 +19,9 @@ Issue #11 makes the normal Web LLM Bridge runtime independent of the inherited A
 
 The headless runtime does not create an Electron `app`, `BrowserWindow`, Control Center, IPC surface, watch-folder manager, or local orchestrator. It always uses Chrome CDP even if a legacy settings file still names the Electron browser backend.
 
-Its bridge-only HTTP surface is limited to health, provider readiness/status, and authenticated `default`-ChatGPT run delegation, status, result, and stop operations. It does not expose navigation, page reading, JavaScript execution, additional tabs/providers, local context or attachment paths, artifacts, or watch folders.
+Its bridge-only HTTP surface is limited to health, provider readiness/status, and authenticated `default`-ChatGPT run delegation, status, result, and stop operations. It does not expose navigation, page reading, JavaScript execution, additional tabs/providers, local context or attachment paths, generic artifacts, or watch folders.
+
+`/runs/delegate` accepts `outputPolicy: "capture"` only for provider-generated files/images belonging to that run's exact finalized assistant turn. `/runs/result` always preserves the raw response and reports parsed completion metadata when present; a missing or malformed completion block, or an output-capture/cache failure, is returned as a warning rather than changing a completed provider generation into a failed run. Captured files live only in the bridge-owned bounded private cache—callers cannot supply paths or retrieve a generic artifact store.
 
 "Headless" here means independent of the Electron desktop shell. The managed Chrome provider window may still be shown when needed for manual sign-in, CAPTCHA, or other human attention.
 
