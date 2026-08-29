@@ -18,10 +18,10 @@ test('completion-contract: parses only the final versioned v1 block after ordina
   });
 });
 
-test('completion-contract: missing block is a warning rather than transport failure', () => {
+test('completion-contract: absent optional metadata is a normal response', () => {
   assert.deepEqual(parseCompletionContract('I finished the summary you asked for.'), {
     completion: null,
-    warnings: ['completion_contract_missing']
+    warnings: []
   });
 });
 

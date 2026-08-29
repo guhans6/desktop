@@ -28,6 +28,6 @@ The parser treats the versioned block as metadata embedded in the finalized assi
 
 A finalized run returns both the raw assistant response and parsed completion metadata. Successful transport, successful completion parsing, and caller acceptance are three distinct states.
 
-If the assistant turn finalizes but the completion block is missing or malformed, the transport result remains `completed`, `rawResponse` is retained, `completion` is `null`, and `warnings` records `completion_contract_missing` or `completion_contract_invalid`. Parsing failure alone is not rewritten into a generic transport failure.
+If the assistant turn finalizes with no completion block, that is a normal response: the transport result remains `completed`, `rawResponse` is retained, `completion` is `null`, and no completion warning is added. If a completion block is present but malformed, `completion` is `null` and `warnings` records `completion_contract_invalid`. Parsing failure alone is not rewritten into a generic transport failure.
 
 When `outputPolicy` is `capture`, the same run result may also include metadata and private cache paths for ChatGPT-generated files/images correlated to that exact assistant turn. A caller may use the raw response, completion metadata, artifacts, and warnings to continue, request clarification, seek human attention, or independently verify the work.

@@ -27,7 +27,7 @@ export function parseCompletionContract(rawResponse) {
     if (line === END) endLines.push(i);
   }
   if (startLines.length === 0 && endLines.length === 0) {
-    return { completion: null, warnings: ['completion_contract_missing'] };
+    return { completion: null, warnings: [] };
   }
   const startLine = startLines[startLines.length - 1];
   const endLine = endLines.find((index) => index > startLine);

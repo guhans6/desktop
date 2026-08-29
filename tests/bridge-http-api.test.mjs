@@ -90,7 +90,7 @@ test('bridge HTTP API is ChatGPT-default-only and rejects inherited desktop rout
   assert.equal(result.body.state, 'completed');
   assert.equal(result.body.result.rawResponse, 'response:Please summarize the current bridge status.');
   assert.equal(result.body.result.completion, null);
-  assert.deepEqual(result.body.result.warnings, ['completion_contract_missing']);
+  assert.deepEqual(result.body.result.warnings, []);
   assert.equal(result.body.result.selection.verified, true);
 });
 
@@ -190,7 +190,7 @@ test('bridge HTTP API retains a completed response when optional provider-output
   assert.equal(result.body.state, 'completed');
   assert.equal(result.body.result.rawResponse, 'I finished the request.');
   assert.deepEqual(result.body.result.artifacts, []);
-  assert.deepEqual(result.body.result.warnings, ['completion_contract_missing', 'artifact_capture_failed']);
+  assert.deepEqual(result.body.result.warnings, ['artifact_capture_failed']);
 });
 
 test('bridge HTTP API acknowledges shutdown before closing the active request', async () => {

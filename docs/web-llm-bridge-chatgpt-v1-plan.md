@@ -72,7 +72,7 @@ Login, CAPTCHA, and Code MCP write/tool confirmations remain human handoffs. The
 
 A successful provider transport is distinct from successful completion-contract parsing and from caller acceptance. Callers may request a versioned final completion block when they need structured completion metadata. The bridge returns the raw assistant response even when that block is absent or parsing fails.
 
-A missing or malformed completion block on an otherwise finalized assistant turn produces a completed transport result with `completion: null` and a warning such as `completion_contract_missing` or `completion_contract_invalid`; it does not rewrite transport completion into a generic failure.
+An absent completion block on an otherwise finalized assistant turn is normal and produces `completion: null` with no completion warning. If a block is present but malformed, the transport still completes with `completion: null` and `completion_contract_invalid`; parsing failure does not rewrite transport completion into a generic failure.
 
 ## Provider-originated output cache
 

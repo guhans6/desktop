@@ -30,7 +30,7 @@ A live output-capture gate passes only when the correlated assistant turn visibl
 
 The `WEB_LLM_BRIDGE_COMPLETION_V1` and `END_WEB_LLM_BRIDGE_COMPLETION_V1` lines are protocol delimiters, not encoding. They exist so a parser can unambiguously separate a final JSON metadata object from ordinary response prose.
 
-Completion-contract parser tests should use those delimiters because that is the format being tested. General live transport/output tests should not force a completion block merely to manufacture a deterministic response. They may instead produce `completion: null` with `completion_contract_missing`; completion parsing is verified independently by protocol and HTTP integration tests.
+Completion-contract parser tests should use those delimiters because that is the format being tested. General live transport/output tests should not force a completion block merely to manufacture a deterministic response. They may instead produce `completion: null` with no completion warning; completion parsing is verified independently by protocol and HTTP integration tests.
 
 If a future end-to-end scenario specifically needs to test completion metadata against the live provider, keep the human task natural and treat the completion footer as a separate protocol concern. Never put claims such as “exact-turn capture succeeded” into the requested completion metadata and then count those claims as evidence.
 
