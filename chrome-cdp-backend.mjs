@@ -7,6 +7,39 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const PROVIDER_FILE_CONTROL_PATTERN = /(?:^download(?:\s|$)|\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)(?:\s|$))/i;
+const PROVIDER_FILENAME_CONTROL_PATTERN = /\.(?:txt|md|csv|json|pdf|zip|docx?|xlsx?|pptx?|png|jpe?g|webp|gif|avif)$/i;
+
+export function looksLikeProviderFileControlLabel(value) {
+  return PROVIDER_FILE_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
+}
+
+const GENERIC_DOWNLOAD_CONTROL_PATTERN = /^download(?:\s|$)/i;
+
+export function looksLikeGenericDownloadControlLabel(value) {
+  return GENERIC_DOWNLOAD_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
+}
+
+export function preferredProviderDownloadName(controlLabel, suggestedFilename) {
+  const label = String(controlLabel || '').replace(/\s+/g, ' ').trim();
+  const filename = label.replace(/^(?:attach|download)\s+/i, '').trim();
+  const suggested = String(suggestedFilename || '').replace(/\s+/g, ' ').trim();
+  return PROVIDER_FILENAME_CONTROL_PATTERN.test(filename) ? filename : suggested || null;
+}
+
+function normalizedProviderDownloadName(value) {
+  return path.basename(String(value || '').replace(/\s+/g, ' ').trim())
+    .replace(/\s*\(\d+\)(?=\.[^.]+$)/, '')
+    .toLowerCase();
+}
+
+export function providerDownloadMatches(expectedNames, suggestedFilename) {
+  const suggested = normalizedProviderDownloadName(suggestedFilename);
+  if (!suggested) return false;
+  return (Array.isArray(expectedNames) ? expectedNames : [])
+    .some((name) => normalizedProviderDownloadName(name) === suggested);
+}
+
 function modifierMask(modifiers = []) {
   let mask = 0;
   for (const modifier of modifiers) {
@@ -298,11 +331,12 @@ export class ChromeCdpConnection {
 }
 
 class ChromeCdpPageAdapter {
-  constructor({ client, targetId, sessionId, windowId = null }) {
+  constructor({ client, targetId, sessionId, windowId = null, stateDir = null }) {
     this.client = client;
     this.targetId = targetId;
     this.sessionId = sessionId;
     this.windowId = windowId;
+    this.stateDir = stateDir;
     this.closed = false;
     this.minimized = false;
   }
@@ -431,6 +465,213 @@ class ChromeCdpPageAdapter {
     const err = new Error('missing_file_input');
     err.data = { selector: 'input[type=file]', found: lastNodeIds.length };
     throw err;
+  }
+
+  async captureAssistantDownloads({
+    assistantTurnIndex,
+    maxItems = 8,
+    maxBytesPerItem = 8 * 1024 * 1024,
+    maxAggregateBytes = 20 * 1024 * 1024,
+    timeoutMs = 5_000
+  } = {}) {
+    const turnIndex = Number(assistantTurnIndex);
+    if (!Number.isInteger(turnIndex) || turnIndex < 0 || !this.stateDir) return { items: [], warnings: [] };
+    const itemCap = Math.max(1, Math.min(12, Math.floor(Number(maxItems) || 8)));
+    const perItemCap = Math.max(1, Math.floor(Number(maxBytesPerItem) || 8 * 1024 * 1024));
+    const aggregateCap = Math.max(perItemCap, Math.floor(Number(maxAggregateBytes) || 20 * 1024 * 1024));
+    const waitMs = Math.max(500, Math.min(10_000, Math.floor(Number(timeoutMs) || 5_000)));
+    await fs.mkdir(this.stateDir, { recursive: true, mode: 0o700 });
+    const stagingDir = await fs.mkdtemp(path.join(this.stateDir, 'download-capture-'));
+    const frameTree = await this.client.send('Page.getFrameTree', {}, this.sessionId);
+    const allowedFrameIds = new Set();
+    const collectFrameIds = (node) => {
+      const frameId = String(node?.frame?.id || '').trim();
+      if (frameId) allowedFrameIds.add(frameId);
+      for (const child of Array.isArray(node?.childFrames) ? node.childFrames : []) collectFrameIds(child);
+    };
+    collectFrameIds(frameTree?.frameTree);
+    const downloads = new Map();
+    let expectedDownloadNames = [];
+    const offBegin = this.client.on('Browser.downloadWillBegin', (params, eventSessionId) => {
+      if (eventSessionId && eventSessionId !== this.sessionId) return;
+      if (!allowedFrameIds.has(String(params?.frameId || ''))) return;
+      if (expectedDownloadNames.length && !providerDownloadMatches(expectedDownloadNames, params?.suggestedFilename)) return;
+      if (downloads.size >= itemCap * 4) return;
+      downloads.set(String(params?.guid || ''), {
+        guid: String(params?.guid || ''),
+        name: String(params?.suggestedFilename || '').trim() || null,
+        state: 'inProgress'
+      });
+    });
+    const offProgress = this.client.on('Browser.downloadProgress', (params) => {
+      const item = downloads.get(String(params?.guid || ''));
+      if (item) item.state = String(params?.state || item.state);
+    });
+
+    try {
+      await this.client.send('Browser.setDownloadBehavior', {
+        behavior: 'allowAndName',
+        downloadPath: stagingDir,
+        eventsEnabled: true
+      });
+      const trigger = await this.evaluate(`(() => {
+        const marker = 'data-web-llm-bridge-preexisting-download';
+        const visible = (node) => {
+          const rect = node?.getBoundingClientRect?.();
+          return !!rect && rect.width > 0 && rect.height > 0;
+        };
+        for (const button of Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible)) {
+          const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+          if (${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label)) button.setAttribute(marker, '1');
+        }
+        const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+        const root = roots[${turnIndex}] || null;
+        if (!root) return { count: 0, names: [] };
+        const buttons = Array.from(root.querySelectorAll('button, [role="button"]')).filter((button) => {
+          const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+          return ${PROVIDER_FILE_CONTROL_PATTERN}.test(label);
+        });
+        const selected = buttons.slice(0, ${itemCap});
+        const names = selected.map((button) => [
+          button.getAttribute('aria-label'),
+          button.getAttribute('title'),
+          button.textContent
+        ]
+          .map((value) => String(value || '').replace(/\s+/g, ' ').trim())
+          .find((value) => ${PROVIDER_FILENAME_CONTROL_PATTERN}.test(value)) || null);
+        for (const button of selected) button.click();
+        return { count: buttons.length, names };
+      })()`);
+      const triggerCount = Number(trigger?.count || 0);
+      const preferredNames = Array.isArray(trigger?.names) ? trigger.names : [];
+      const expectedPreviewNames = preferredNames
+        .map((name) => preferredProviderDownloadName(name, null))
+        .filter(Boolean);
+      expectedDownloadNames = expectedPreviewNames;
+      for (const [guid, download] of downloads) {
+        if (!providerDownloadMatches(expectedDownloadNames, download.name)) downloads.delete(guid);
+      }
+      if (Number(triggerCount) > 0) {
+        const fallbackStartedAt = Date.now();
+        while (Date.now() - fallbackStartedAt < Math.min(waitMs, 2_500) && downloads.size === 0) {
+          const target = await this.evaluate(`(() => {
+            const marker = 'data-web-llm-bridge-preexisting-download';
+            const expectedNames = ${JSON.stringify(expectedPreviewNames)};
+            const visible = (node) => {
+              const rect = node?.getBoundingClientRect?.();
+              return !!rect && rect.width > 0 && rect.height > 0;
+            };
+            const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+            const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+            const turnRoot = roots[${turnIndex}] || null;
+            if (!turnRoot || expectedNames.length === 0) return null;
+            const previewNames = Array.from(document.querySelectorAll('[aria-label], [title]'))
+              .filter(visible)
+              .filter((node) => !turnRoot.contains(node))
+              .filter((node) => [node.getAttribute('aria-label'), node.getAttribute('title')]
+                .map((value) => clean(value).replace(/^(?:attach|download)\\s+/i, '').trim())
+                .some((value) => expectedNames.includes(value)));
+            const commonAncestor = (left, right) => {
+              const ancestors = new Set();
+              for (let node = left; node; node = node.parentElement) ancestors.add(node);
+              for (let node = right; node; node = node.parentElement) {
+                if (ancestors.has(node)) return node;
+              }
+              return null;
+            };
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+              .filter(visible)
+              .filter((button) => !button.hasAttribute(marker))
+              .filter((button) => {
+                const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+                  .filter(Boolean)
+                  .join(' ')
+                  .replace(/\\s+/g, ' ')
+                  .trim();
+                return ${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label);
+              });
+            for (const button of buttons) {
+              for (const nameNode of previewNames) {
+                const scope = commonAncestor(button, nameNode);
+                if (!scope || scope === document.body || scope === document.documentElement || scope.contains(turnRoot)) continue;
+                const scopeRect = scope.getBoundingClientRect?.();
+                if (!scopeRect || scopeRect.width <= 0 || scopeRect.height <= 0) continue;
+                if (scopeRect.width * scopeRect.height > innerWidth * innerHeight * 0.8) continue;
+                const rect = button.getBoundingClientRect();
+                return {
+                  x: rect.x + rect.width / 2,
+                  y: rect.y + rect.height / 2,
+                  width: rect.width,
+                  height: rect.height
+                };
+              }
+            }
+            return null;
+          })()`);
+          if (target?.width > 0 && target?.height > 0) {
+            await this.moveMouse(target.x, target.y);
+            await this.mouseDown(target.x, target.y, { button: 'left', clickCount: 1 });
+            await sleep(30);
+            await this.mouseUp(target.x, target.y, { button: 'left', clickCount: 1 });
+            await sleep(350);
+          } else {
+            await sleep(100);
+          }
+        }
+      }
+      await this.evaluate(`(() => {
+        for (const button of document.querySelectorAll('[data-web-llm-bridge-preexisting-download]')) button.removeAttribute('data-web-llm-bridge-preexisting-download');
+      })()`).catch(() => {});
+
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < waitMs && ![...downloads.values()].some((item) => item.state === 'completed')) {
+        await sleep(100);
+      }
+
+      const items = [];
+      const warnings = [];
+      let aggregateBytes = 0;
+      for (const [downloadIndex, download] of [...downloads.values()].filter((item) => item.state === 'completed').slice(0, itemCap).entries()) {
+        const filePath = path.join(stagingDir, download.guid);
+        try {
+          const stat = await fs.stat(filePath);
+          if (stat.size > perItemCap) {
+            warnings.push('artifact_per_file_limit');
+            continue;
+          }
+          if (aggregateBytes + stat.size > aggregateCap) {
+            warnings.push('artifact_aggregate_limit');
+            break;
+          }
+          const data = await fs.readFile(filePath);
+          aggregateBytes += stat.size;
+          items.push({
+            kind: 'file',
+            name: preferredProviderDownloadName(preferredNames[downloadIndex], download.name),
+            mime: 'application/octet-stream',
+            size: stat.size,
+            dataBase64: data.toString('base64')
+          });
+        } catch {
+          warnings.push('artifact_capture_failed');
+        }
+      }
+      if (downloads.size && !items.length && !warnings.length) warnings.push('artifact_capture_failed');
+      return { items, warnings: [...new Set(warnings)] };
+    } finally {
+      offBegin();
+      offProgress();
+      await this.client.send('Browser.setDownloadBehavior', { behavior: 'default' }).catch(() => {});
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+    }
   }
 
   async bringToFront() {
@@ -652,7 +893,7 @@ export class ChromeCdpBrowserBackend {
         if (browserWindow && Number.isFinite(browserWindow.windowId)) windowId = browserWindow.windowId;
       } catch {}
 
-      const page = new ChromeCdpPageAdapter({ client: this.client, targetId, sessionId, windowId });
+      const page = new ChromeCdpPageAdapter({ client: this.client, targetId, sessionId, windowId, stateDir: this.stateDir });
       await page.initialize({ userAgent: this.userAgent });
       if (show) await page.bringToFront().catch(() => {});
       else await page.minimize().catch(() => {});

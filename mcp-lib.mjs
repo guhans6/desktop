@@ -21,28 +21,6 @@ async function fileExists(p) {
   }
 }
 
-async function electronLaunch({ platform, allowFallback = false }) {
-  const override = String(process.env.AGENTIFY_DESKTOP_ELECTRON_BIN || '').trim();
-  if (override) {
-    return {
-      command: override,
-      argsPrefix: [],
-      shell: platform === 'win32' && /\.(cmd|bat)$/i.test(override)
-    };
-  }
-
-  const electronCli = path.resolve(__dirname, 'node_modules', 'electron', 'cli.js');
-  if (await fileExists(electronCli)) {
-    return { command: process.execPath, argsPrefix: [electronCli], shell: false };
-  }
-
-  if (allowFallback) {
-    return { command: 'electron', argsPrefix: [], shell: platform === 'win32' };
-  }
-
-  throw new Error('missing_electron_binary');
-}
-
 export async function loadConnection({ stateDir }) {
   const state = await readState(stateDir);
   const token = await readToken(stateDir);
@@ -89,8 +67,7 @@ export async function ensureDesktopRunning({
   fetchImpl = fetch,
   spawnImpl = spawn,
   timeoutMs = 30_000,
-  showTabs = false,
-  platform = process.platform
+  showTabs = false
 }) {
   const conn = await loadConnection({ stateDir });
   if (conn) {
@@ -102,11 +79,10 @@ export async function ensureDesktopRunning({
     }
   }
 
-  const entry = path.join(__dirname, 'main.mjs');
-  const launch = await electronLaunch({ platform, allowFallback: spawnImpl !== spawn });
-  if (!(await fileExists(entry))) throw new Error('missing_desktop_entry');
+  const entry = path.join(__dirname, 'bridge-main.mjs');
+  if (!(await fileExists(entry))) throw new Error('missing_bridge_entry');
 
-  spawnImpl(launch.command, [...launch.argsPrefix, entry], {
+  spawnImpl(process.execPath, [entry], {
     detached: true,
     stdio: 'ignore',
     env: {
@@ -114,7 +90,7 @@ export async function ensureDesktopRunning({
       AGENTIFY_DESKTOP_STATE_DIR: stateDir,
       ...(showTabs ? { AGENTIFY_DESKTOP_SHOW_TABS: 'true' } : {})
     },
-    shell: launch.shell
+    shell: false
   })?.unref?.();
 
   const start = Date.now();

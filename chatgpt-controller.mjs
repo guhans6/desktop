@@ -1,5 +1,13 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {
+  chatGptLabelMatches,
+  chatGptModeLabels,
+  chatGptModeVerified,
+  classifyChatGptModeLabel,
+  normalizeChatGptMode,
+  observedChatGptMode
+} from './chatgpt-mode.mjs';
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -228,15 +236,23 @@ export class ChatGPTController {
     throw err;
   }
 
-  async ensureReady({ timeoutMs = 10 * 60_000 } = {}) {
-    await this.#emitProgress({ phase: 'waiting_for_ready', blocked: false, blockedKind: null, blockedTitle: null });
-    const st = await this.detectChallenge().catch(() => null);
-    if (st?.blocked) {
-      await this.#enterBlockedState(st);
+  async ensureReady({ timeoutMs = 10 * 60_000, onProgress = null } = {}) {
+    const progressRun = !this.currentRun && typeof onProgress === 'function'
+      ? { kind: 'readiness', requested: false, requestedAt: null, reason: null, onProgress }
+      : null;
+    if (progressRun) this.currentRun = progressRun;
+    try {
+      await this.#emitProgress({ phase: 'waiting_for_ready', blocked: false, blockedKind: null, blockedTitle: null });
+      const st = await this.detectChallenge().catch(() => null);
+      if (st?.blocked) {
+        await this.#enterBlockedState(st);
+      }
+      const ready = await this.waitForPromptVisible({ timeoutMs });
+      await this.#exitBlockedStateIfNeeded();
+      return ready;
+    } finally {
+      if (this.currentRun === progressRun) this.currentRun = null;
     }
-    const ready = await this.waitForPromptVisible({ timeoutMs });
-    await this.#exitBlockedStateIfNeeded();
-    return ready;
   }
 
   async #enterBlockedState(st) {
@@ -309,6 +325,14 @@ export class ChatGPTController {
   async #typeHuman(text) {
     for (const ch of String(text)) {
       this.#throwIfStopRequested();
+      // ChatGPT can treat a raw newline inserted into its composer as a
+      // submission. Preserve multiline prompts with its explicit newline
+      // gesture, rather than letting one prompt become several user turns.
+      if (ch === '\n') {
+        await this.#sendKey('Enter', { modifiers: ['shift'] });
+        await sleep(jitter(25, 80));
+        continue;
+      }
       await this.page.insertText(ch);
       await sleep(jitter(12, 45));
     }
@@ -416,7 +440,289 @@ export class ChatGPTController {
     await this.#typeHuman(prompt);
   }
 
-  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120 } = {}) {
+  async #readChatGptModeSnapshot() {
+    return await this.#eval(`(() => {
+      const host = String(location.hostname || '').toLowerCase();
+      if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com')) {
+        return { chatgpt: false, pickerFound: false, pickerLabel: null, selectedLabels: [], options: [] };
+      }
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clean = (value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const known = new Set(['instant', 'medium', 'high', 'extra high', 'extra-high', 'pro', 'pro standard', 'pro extended', 'standard', 'extended']);
+      const fieldsOf = (n) => [
+        n?.textContent || '',
+        n?.getAttribute?.('aria-label') || '',
+        n?.getAttribute?.('title') || '',
+        n?.getAttribute?.('data-testid') || ''
+      ].map((value) => String(value || '').replace(/\\s+/g, ' ').trim()).filter(Boolean);
+      const labelOf = (n) => fieldsOf(n).join(' ');
+      const pickerCandidates = Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible);
+      let picker = null;
+      let best = -Infinity;
+      for (const n of pickerCandidates) {
+        const raw = labelOf(n);
+        const label = clean(raw);
+        const testId = String(n.getAttribute('data-testid') || '').toLowerCase();
+        if (testId === 'accounts-profile-button' || /open profile menu|accounts-profile-button/.test(label)) continue;
+        if (/send|stop|attach|upload|voice|microphone|tools|share|copy/.test(label)) continue;
+        let score = 0;
+        if (/model|reason|mode/.test(label)) score += 100;
+        if (known.has(label)) score += 120;
+        if (/gpt|instant|medium|high|(^|[^a-z])pro([^a-z]|$)/.test(label)) score += 50;
+        if (n.getAttribute('aria-haspopup')) score += 30;
+        const r = n.getBoundingClientRect();
+        score += Math.max(0, 300 - r.y) / 20;
+        if (score > best && score >= 50) { best = score; picker = n; }
+      }
+      const optionNodes = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="radio"], [data-radix-collection-item], [data-state]'))
+        .filter(visible)
+        .slice(0, 100);
+      const options = [];
+      const selectedLabels = [];
+      const seen = new Set();
+      for (const n of optionNodes) {
+        const fields = fieldsOf(n);
+        const raw = fields.join(' ');
+        const label = raw.replace(/\\s+/g, ' ').trim();
+        if (!label) continue;
+        const normalized = clean(label);
+        if (seen.has(normalized)) continue;
+        seen.add(normalized);
+        const selected =
+          String(n.getAttribute('aria-selected') || '').toLowerCase() === 'true' ||
+          String(n.getAttribute('aria-checked') || '').toLowerCase() === 'true' ||
+          String(n.getAttribute('data-state') || '').toLowerCase() === 'checked';
+        options.push({ label, labels: fields, selected });
+        if (selected) selectedLabels.push(label);
+      }
+      return {
+        chatgpt: true,
+        pickerFound: !!picker,
+        pickerLabel: picker ? labelOf(picker) : null,
+        selectedLabels,
+        options
+      };
+    })()`);
+  }
+
+  async #openChatGptModePicker() {
+    return await this.#eval(`(() => {
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clean = (value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const known = new Set(['instant', 'medium', 'high', 'extra high', 'extra-high', 'pro', 'pro standard', 'pro extended']);
+      const labelOf = (n) => [n?.getAttribute?.('aria-label') || '', n?.getAttribute?.('title') || '', n?.getAttribute?.('data-testid') || '', n?.textContent || '']
+        .filter(Boolean).join(' ').replace(/\\s+/g, ' ').trim();
+      let picker = null;
+      let best = -Infinity;
+      for (const n of Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible)) {
+        const label = clean(labelOf(n));
+        const testId = String(n.getAttribute('data-testid') || '').toLowerCase();
+        if (testId === 'accounts-profile-button' || /open profile menu|accounts-profile-button/.test(label)) continue;
+        if (/send|stop|attach|upload|voice|microphone|tools|share|copy/.test(label)) continue;
+        let score = 0;
+        if (/model|reason|mode/.test(label)) score += 100;
+        if (known.has(label)) score += 120;
+        if (/gpt|instant|medium|high|(^|[^a-z])pro([^a-z]|$)/.test(label)) score += 50;
+        if (n.getAttribute('aria-haspopup')) score += 30;
+        if (score > best && score >= 50) { best = score; picker = n; }
+      }
+      if (!picker) return { ok: false, pickerLabel: null };
+      const pickerLabel = labelOf(picker);
+      picker.click();
+      return { ok: true, pickerLabel };
+    })()`);
+  }
+
+  async #clickChatGptModeOption(labels) {
+    const allowedLabels = JSON.stringify((Array.isArray(labels) ? labels : []).map((item) => String(item || '').trim()).filter(Boolean));
+    return await this.#eval(`(() => {
+      const labels = ${allowedLabels};
+      const wanted = new Set(labels.map((value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase()));
+      const visible = (n) => {
+        if (!n) return false;
+        const r = n.getBoundingClientRect();
+        const style = window.getComputedStyle(n);
+        return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const clean = (value) => String(value || '').replace(/[–—]/g, '-').replace(/[_]+/g, ' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const fieldsOf = (n) => [
+        n?.textContent || '',
+        n?.getAttribute?.('aria-label') || '',
+        n?.getAttribute?.('title') || ''
+      ].map((value) => String(value || '').replace(/\\s+/g, ' ').trim()).filter(Boolean);
+      const labelOf = (n) => fieldsOf(n).join(' ');
+      const matchesWanted = (field) => wanted.has(clean(field));
+      const candidates = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], [role="menuitemradio"], [role="radio"], [data-radix-collection-item], button'))
+        .filter(visible);
+      const option = candidates.find((n) => fieldsOf(n).some(matchesWanted));
+      if (!option) return { clicked: false, label: null };
+      const label = labelOf(option);
+      option.click();
+      return { clicked: true, label };
+    })()`);
+  }
+
+  async selectMode({ mode = 'current', timeoutMs = 5_000 } = {}) {
+    const requested = normalizeChatGptMode(mode);
+    // Live ChatGPT tabs may exist in bridge metadata before the underlying
+    // browser page has completed its initial navigation. Real browser page
+    // adapters expose getUrl(); wait for provider readiness before validating
+    // the host or picker state. The composer picker hydrates independently
+    // from the prompt, so real adapters also wait for that observable mode
+    // state. Minimal unit-test adapters may omit getUrl().
+    const realPageAdapter = typeof this.page?.getUrl === 'function';
+    if (realPageAdapter) {
+      await this.ensureReady({ timeoutMs });
+    }
+    let initial = await this.#readChatGptModeSnapshot();
+    const readyForRequestedMode = (snapshot) => {
+      if (!snapshot?.chatgpt || !snapshot?.pickerFound) return false;
+      return requested !== 'current' || !!observedChatGptMode(snapshot).mode;
+    };
+    const startedAt = Date.now();
+    const waitLimit = Math.max(100, Math.min(5_000, Number(timeoutMs) || 5_000));
+    while (realPageAdapter && !readyForRequestedMode(initial) && Date.now() - startedAt < waitLimit) {
+      await sleep(100);
+      initial = await this.#readChatGptModeSnapshot();
+    }
+    if (!initial?.chatgpt) {
+      const error = new Error('chatgpt_mode_unavailable');
+      error.data = { requested, reason: 'not_chatgpt' };
+      throw error;
+    }
+    const initialObserved = observedChatGptMode(initial);
+    if (requested === 'current') {
+      // A current-mode request is only verified when an actual mode is
+      // observable from the identified picker. Never treat an unrelated
+      // control (for example, the profile menu) or an unlabelled picker as
+      // successful mode verification.
+      if (initial?.pickerFound && initialObserved?.mode) {
+        return { requested, observed: initialObserved, verified: true, changed: false };
+      }
+      const error = new Error('chatgpt_mode_verification_failed');
+      error.data = {
+        requested,
+        reason: initial?.pickerFound ? 'current_mode_not_observable' : 'picker_not_found',
+        observed: initialObserved
+      };
+      throw error;
+    }
+    if (chatGptModeVerified(requested, initial)) {
+      return { requested, observed: initialObserved, verified: true, changed: false };
+    }
+
+    const opened = await this.#openChatGptModePicker();
+    if (!opened?.ok) {
+      const error = new Error('chatgpt_mode_unavailable');
+      error.data = { requested, reason: 'picker_not_found', observed: initialObserved };
+      throw error;
+    }
+
+    let menu = await this.#readChatGptModeSnapshot();
+    const labelsFromMenu = (snapshot) => (snapshot?.options || []).flatMap((item) => {
+      const labels = Array.isArray(item?.labels) && item.labels.length ? item.labels : [item?.label];
+      return labels.map((label) => String(label || '').trim()).filter(Boolean);
+    });
+    let optionLabels = labelsFromMenu(menu);
+    const menuStartedAt = Date.now();
+    const hasHydratedOptions = (labels) => labels.some((label) => {
+      const mode = classifyChatGptModeLabel(label);
+      return mode && (mode === requested || mode !== initialObserved.mode);
+    });
+    while (realPageAdapter && !hasHydratedOptions(optionLabels) && Date.now() - menuStartedAt < waitLimit) {
+      await sleep(100);
+      menu = await this.#readChatGptModeSnapshot();
+      optionLabels = labelsFromMenu(menu);
+    }
+    const directLabels = chatGptModeLabels(requested);
+    const directOptionLabel = optionLabels.find((label) => classifyChatGptModeLabel(label) === requested) || null;
+
+    if (directOptionLabel) {
+      const clicked = await this.#clickChatGptModeOption([directOptionLabel]);
+      if (!clicked?.clicked) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'option_not_clickable', available: optionLabels };
+        throw error;
+      }
+    } else if (requested === 'pro_standard' || requested === 'pro_extended') {
+      const proOptionLabel = optionLabels.find((label) => classifyChatGptModeLabel(label) === 'pro') || null;
+      if (!proOptionLabel) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'option_missing', available: optionLabels };
+        throw error;
+      }
+      const proClicked = await this.#clickChatGptModeOption([proOptionLabel]);
+      if (!proClicked?.clicked) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'pro_not_clickable', available: optionLabels };
+        throw error;
+      }
+      await sleep(80);
+      menu = await this.#readChatGptModeSnapshot();
+      const submenuLabels = (menu?.options || []).flatMap((item) => {
+        const labels = Array.isArray(item?.labels) && item.labels.length ? item.labels : [item?.label];
+        return labels.map((label) => String(label || '').trim()).filter(Boolean);
+      });
+      const nested = chatGptModeLabels(requested, { submenu: true });
+      const nestedOptionLabel = submenuLabels.find((label) => chatGptLabelMatches(label, nested)) || null;
+      if (!nestedOptionLabel) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'pro_submode_missing', available: submenuLabels };
+        throw error;
+      }
+      const nestedClicked = await this.#clickChatGptModeOption([nestedOptionLabel]);
+      if (!nestedClicked?.clicked) {
+        const error = new Error('chatgpt_mode_unavailable');
+        error.data = { requested, reason: 'pro_submode_not_clickable', available: submenuLabels };
+        throw error;
+      }
+    } else {
+      const error = new Error('chatgpt_mode_unavailable');
+      error.data = { requested, reason: 'option_missing', available: optionLabels };
+      throw error;
+    }
+
+    const verificationStartedAt = Date.now();
+    let observedSnapshot = null;
+    do {
+      observedSnapshot = await this.#readChatGptModeSnapshot();
+      if (chatGptModeVerified(requested, observedSnapshot)) {
+        return { requested, observed: observedChatGptMode(observedSnapshot), verified: true, changed: true };
+      }
+      if (Date.now() - verificationStartedAt >= Math.max(100, Math.min(5_000, Number(timeoutMs) || 5_000))) break;
+      await sleep(100);
+    } while (true);
+
+    const error = new Error('chatgpt_mode_verification_failed');
+    error.data = { requested, observed: observedChatGptMode(observedSnapshot || {}) };
+    throw error;
+  }
+
+  async #captureChatGptTurnState() {
+    return await this.#eval(`(() => {
+      const host = String(location.hostname || '').toLowerCase();
+      if (host !== 'chatgpt.com' && !host.endsWith('.chatgpt.com')) {
+        return { chatgpt: false, userCount: 0, assistantCount: 0 };
+      }
+      return {
+        chatgpt: true,
+        userCount: document.querySelectorAll('[data-message-author-role="user"]').length,
+        assistantCount: document.querySelectorAll('[data-message-author-role="assistant"]').length
+      };
+    })()`);
+  }
+
+  async #waitForSendSignal({ timeoutMs = 1800, pollMs = 120, turnState = null } = {}) {
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const promptSel = JSON.stringify(this.selectors.promptTextarea);
@@ -458,13 +764,28 @@ export class ChatGPTController {
         return { stopVisible, sendDisabled, promptLen };
       })()`);
 
+      if (turnState?.chatgpt) {
+        const currentTurnState = await this.#captureChatGptTurnState().catch(() => null);
+        if (currentTurnState?.chatgpt) {
+          const userTurnDelta = currentTurnState.userCount - turnState.userCount;
+          if (userTurnDelta === 1) return true;
+          if (userTurnDelta > 1) {
+            const err = new Error('duplicate_user_turn_detected');
+            err.data = { baselineUserCount: turnState.userCount, currentUserCount: currentTurnState.userCount };
+            throw err;
+          }
+        }
+        await sleep(pollMs);
+        continue;
+      }
+
       if (snap?.stopVisible || snap?.sendDisabled || snap?.promptLen === 0) return true;
       await sleep(pollMs);
     }
     return false;
   }
 
-  async #clickSend() {
+  async #clickSend({ turnState = null } = {}) {
     await this.#emitProgress({ phase: 'sending_prompt' });
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const stopSel = JSON.stringify(this.selectors.stopButton);
@@ -603,12 +924,33 @@ export class ChatGPTController {
     }
 
     let sent = false;
-    if (res?.rect?.w > 0 && res?.rect?.h > 0) {
+    if (turnState?.chatgpt) {
+      this.#throwIfStopRequested();
+      const directClicked = await this.#eval(`(() => {
+        const visible = (n) => {
+          if (!n) return false;
+          const r = n.getBoundingClientRect();
+          const style = window.getComputedStyle(n);
+          return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        const disabled = (n) => !!n.disabled || String(n.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+        const exactSend = Array.from(document.querySelectorAll('button[data-testid="send-button"]'))
+          .find((n) => visible(n) && !disabled(n));
+        if (!exactSend) return false;
+        exactSend.click();
+        return true;
+      })()`).catch(() => false);
+      if (directClicked) {
+        sent = await this.#waitForSendSignal({ timeoutMs: 4000, pollMs: 120, turnState });
+      }
+    }
+
+    if (!sent && res?.rect?.w > 0 && res?.rect?.h > 0) {
       this.#throwIfStopRequested();
       const cx = Math.round(res.rect.x + res.rect.w / 2);
       const cy = Math.round(res.rect.y + res.rect.h / 2);
       await this.#clickAt(cx, cy);
-      sent = await this.#waitForSendSignal({ timeoutMs: 2200, pollMs: 120 });
+      sent = await this.#waitForSendSignal({ timeoutMs: turnState?.chatgpt ? 4000 : 2200, pollMs: 120, turnState });
     }
 
     if (!sent && !res?.fallbackEnter) {
@@ -653,7 +995,7 @@ export class ChatGPTController {
         }
         return false;
       })()`);
-      sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120 });
+      sent = await this.#waitForSendSignal({ timeoutMs: 1400, pollMs: 120, turnState });
     }
 
     if (!sent) {
@@ -677,7 +1019,7 @@ export class ChatGPTController {
         this.#throwIfStopRequested();
         await sleep(jitter(25, 90));
         await this.#sendKey(key, { modifiers });
-        sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120 });
+        sent = await this.#waitForSendSignal({ timeoutMs: 1500, pollMs: 120, turnState });
         if (sent) break;
       }
     }
@@ -706,9 +1048,11 @@ export class ChatGPTController {
     await this.page.setFileInputFiles(absFiles);
   }
 
-  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400 } = {}) {
+  async #waitForAssistantStable({ timeoutMs = 5 * 60_000, stableMs = 1500, pollMs = 400, turnState = null } = {}) {
     await this.#emitProgress({ phase: 'waiting_for_response', blocked: false, blockedKind: null, blockedTitle: null });
     const assistantSel = JSON.stringify(this.selectors.assistantMessage);
+    const correlateChatGpt = !!turnState?.chatgpt;
+    const assistantBaseline = Number(turnState?.assistantCount || 0);
     const stopSel = JSON.stringify(this.selectors.stopButton);
     const sendSel = JSON.stringify(this.selectors.sendButton);
     const start = Date.now();
@@ -728,13 +1072,33 @@ export class ChatGPTController {
         });
         const sendEnabled = send ? !send.disabled : true;
         const nodes = Array.from(document.querySelectorAll(${assistantSel}));
-        const lastNode = nodes[nodes.length - 1];
-        const fallbackMainText = ((document.querySelector('main') || document.body)?.innerText || '').trim();
+        const chatgptNodes = ${correlateChatGpt}
+          ? Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
+          : [];
+        const lastNode = ${correlateChatGpt}
+          ? (chatgptNodes[${assistantBaseline}] || null)
+          : nodes[nodes.length - 1];
+        const fallbackMainText = ${correlateChatGpt} ? '' : (((document.querySelector('main') || document.body)?.innerText || '').trim());
         const txt = (lastNode?.innerText || fallbackMainText).trim();
         const hasContinue = Array.from(document.querySelectorAll('button, a')).some(b => /continue generating/i.test((b.textContent||'').trim()));
         const hasRegenerate = Array.from(document.querySelectorAll('button, a')).some(b => /regenerate/i.test((b.textContent||'').trim()));
         const hasError = /something went wrong|try again|error/i.test(txt) && txt.length < 500;
-        return { stop, sendEnabled, txt, count: nodes.length, usedFallback: !lastNode, hasError, hasContinue, hasRegenerate };
+        const turnRoot = lastNode?.closest?.('[data-testid^="conversation-turn-"], article, section') || lastNode?.parentElement || null;
+        const hasTurnActions = !${correlateChatGpt} || !!turnRoot?.querySelector?.(
+          'button[data-testid="copy-turn-action-button"], button[data-testid*="copy-turn" i]'
+        );
+        return {
+          stop,
+          sendEnabled,
+          txt,
+          count: ${correlateChatGpt} ? chatgptNodes.length : nodes.length,
+          correlated: ${correlateChatGpt} ? !!lastNode : true,
+          usedFallback: !lastNode,
+          hasError,
+          hasContinue,
+          hasRegenerate,
+          hasTurnActions
+        };
       })()`);
 
       const txt = String(snap?.txt || '');
@@ -763,16 +1127,24 @@ export class ChatGPTController {
         continue;
       }
 
-      const readyByNodes = (snap?.count || 0) > 0;
+      const readyByNodes = correlateChatGpt ? !!snap?.correlated : (snap?.count || 0) > 0;
       const fallbackWaited = !!snap?.usedFallback && (Date.now() - start >= 2500);
       const fallbackStableLongEnough = txt.length > 0 && (Date.now() - lastChange >= Math.max(dynamicStableMs, 5000));
+      const transientChatGpt = correlateChatGpt && txt.length < 500 && /^(thinking|working|searching|analyzing|generating|reading|browsing|using\s+(?:a\s+)?tool)(?:\b|[. …])/i.test(txt.trim());
+      const finishedTurnEvidence = !correlateChatGpt || !!snap?.hasTurnActions;
       const done =
-        (!generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
-        (!generating && fallbackStableLongEnough && (readyByNodes || fallbackWaited));
+        !transientChatGpt && finishedTurnEvidence && (
+          (!generating && stopGoneLongEnough && snap?.sendEnabled && stable && txt.length > 0 && (readyByNodes || fallbackWaited)) ||
+          (!generating && fallbackStableLongEnough && (readyByNodes || fallbackWaited))
+        );
       if (done) {
         const extra = await this.#eval(`(() => {
-          const nodes = Array.from(document.querySelectorAll(${assistantSel}));
-          const lastNode = nodes[nodes.length - 1];
+          const nodes = ${correlateChatGpt}
+            ? Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
+            : Array.from(document.querySelectorAll(${assistantSel}));
+          const lastNode = ${correlateChatGpt}
+            ? (nodes[${assistantBaseline}] || null)
+            : nodes[nodes.length - 1];
           const codes = Array.from(lastNode?.querySelectorAll('pre code') || []).map(c => {
             const cls = String(c.className || '');
             const lang = (cls.match(/language-([a-z0-9_-]+)/i) || [])[1] || null;
@@ -780,7 +1152,15 @@ export class ChatGPTController {
           }).filter(c => c.text);
           return { codeBlocks: codes };
         })()`);
-        return { text: txt, codeBlocks: extra?.codeBlocks || [], meta: { count: snap?.count || 0, hasError: !!snap?.hasError } };
+        return {
+          text: txt,
+          codeBlocks: extra?.codeBlocks || [],
+          meta: {
+            count: snap?.count || 0,
+            hasError: !!snap?.hasError,
+            assistantTurnIndex: correlateChatGpt ? assistantBaseline : null
+          }
+        };
       }
 
       await sleep(pollMs);
@@ -799,9 +1179,10 @@ export class ChatGPTController {
     try {
       await this.ensureReady({ timeoutMs });
       await this.#attachFiles(attachments);
+      const turnState = await this.#captureChatGptTurnState().catch(() => null);
       await this.#typePrompt(prompt);
-      await this.#clickSend();
-      return await this.#waitForAssistantStable({ timeoutMs: Math.min(timeoutMs, 8 * 60_000) });
+      await this.#clickSend({ turnState });
+      return await this.#waitForAssistantStable({ timeoutMs: Math.min(timeoutMs, 8 * 60_000), turnState });
     } finally {
       if (this.currentRun === run) this.currentRun = null;
     }
@@ -817,8 +1198,9 @@ export class ChatGPTController {
       this.currentRun = run;
       try {
         await this.ensureReady({ timeoutMs });
+        const turnState = await this.#captureChatGptTurnState().catch(() => null);
         await this.#typePrompt(prompt);
-        await this.#clickSend();
+        await this.#clickSend({ turnState });
 
         if (stopAfterSend) {
           const start = Date.now();
@@ -835,6 +1217,121 @@ export class ChatGPTController {
         if (this.currentRun === run) this.currentRun = null;
       }
     });
+  }
+
+  async captureAssistantOutputs({
+    assistantTurnIndex,
+    maxItems = 8,
+    maxBytesPerItem = 8 * 1024 * 1024,
+    maxAggregateBytes = 20 * 1024 * 1024
+  } = {}) {
+    const turnIndex = Number(assistantTurnIndex);
+    if (!Number.isInteger(turnIndex) || turnIndex < 0) {
+      const error = new Error('missing_assistant_turn_index');
+      error.data = { assistantTurnIndex };
+      throw error;
+    }
+    const itemCap = Math.max(1, Math.min(12, Math.floor(Number(maxItems) || 8)));
+    const perItemCap = Math.max(1, Math.min(12 * 1024 * 1024, Math.floor(Number(maxBytesPerItem) || 8 * 1024 * 1024)));
+    const aggregateCap = Math.max(perItemCap, Math.min(32 * 1024 * 1024, Math.floor(Number(maxAggregateBytes) || 20 * 1024 * 1024)));
+    const browserCaptured = typeof this.page?.captureAssistantDownloads === 'function'
+      ? await this.page.captureAssistantDownloads({
+        assistantTurnIndex: turnIndex,
+        maxItems: itemCap,
+        maxBytesPerItem: perItemCap,
+        maxAggregateBytes: aggregateCap
+      })
+      : { items: [], warnings: [] };
+    const out = await this.#eval(`(async () => {
+      const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+      const root = nodes[${turnIndex}] || null;
+      if (!root) return { items: [], warnings: ['artifact_exact_turn_missing'] };
+      const maxItems = ${itemCap};
+      const maxBytesPerItem = ${perItemCap};
+      const maxAggregateBytes = ${aggregateCap};
+      const warnings = [];
+      const candidates = [];
+      const seen = new Set();
+      const add = (item) => {
+        const source = String(item?.source || '').trim();
+        if (!source || seen.has(source) || candidates.length >= maxItems) return;
+        if (!/^(?:https:|blob:|data:)/i.test(source)) return;
+        seen.add(source);
+        candidates.push({ ...item, source });
+      };
+      const cleanName = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      for (const a of Array.from(root.querySelectorAll('a[href], a[download]'))) {
+        if (candidates.length >= maxItems) break;
+        const source = String(a.href || a.getAttribute('href') || '').trim();
+        const download = cleanName(a.getAttribute('download'));
+        const text = cleanName(a.textContent);
+        const title = cleanName(a.getAttribute('title'));
+        const aria = cleanName(a.getAttribute('aria-label'));
+        const hint = download || text || title || aria;
+        let pathname = '';
+        try { pathname = new URL(source, location.href).pathname || ''; } catch {}
+        const looksFile = !!download || /(?:download|export|attachment|file|image|pdf|csv|json|zip|txt|markdown|document|spreadsheet|presentation)/i.test(hint) || /\.(?:png|jpe?g|webp|gif|avif|pdf|csv|json|zip|txt|md|docx?|xlsx?|pptx?)(?:$|[?#])/i.test(pathname);
+        if (looksFile) add({ kind: 'file', source, name: hint || null });
+      }
+      for (const img of Array.from(root.querySelectorAll('img'))) {
+        if (candidates.length >= maxItems) break;
+        const rect = img.getBoundingClientRect();
+        if (rect.width < 64 || rect.height < 64) continue;
+        const source = String(img.currentSrc || img.src || '').trim();
+        add({ kind: 'image', source, name: cleanName(img.alt) || null });
+      }
+
+      const items = [];
+      let aggregateBytes = 0;
+      for (const candidate of candidates) {
+        try {
+          const response = await fetch(candidate.source, { credentials: 'include' });
+          if (!response.ok && /^https:/i.test(candidate.source)) {
+            warnings.push('artifact_capture_failed');
+            continue;
+          }
+          const blob = await response.blob();
+          const size = Number(blob.size || 0);
+          if (size <= 0) continue;
+          if (size > maxBytesPerItem) {
+            warnings.push('artifact_per_file_limit');
+            continue;
+          }
+          if (aggregateBytes + size > maxAggregateBytes) {
+            warnings.push('artifact_aggregate_limit');
+            break;
+          }
+          const mime = String(blob.type || response.headers?.get?.('content-type') || '').split(';')[0].trim().toLowerCase() || 'application/octet-stream';
+          if (mime === 'text/html' || mime === 'application/xhtml+xml') {
+            warnings.push('artifact_html_rejected');
+            continue;
+          }
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('file_reader_error'));
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.readAsDataURL(blob);
+          });
+          const comma = dataUrl.indexOf(',');
+          if (comma < 0) {
+            warnings.push('artifact_capture_failed');
+            continue;
+          }
+          aggregateBytes += size;
+          items.push({ kind: candidate.kind, name: candidate.name || null, mime, size, dataBase64: dataUrl.slice(comma + 1) });
+        } catch {
+          warnings.push('artifact_capture_failed');
+        }
+      }
+      return { items, warnings: Array.from(new Set(warnings)) };
+    })()`);
+    return {
+      items: [...(Array.isArray(browserCaptured?.items) ? browserCaptured.items : []), ...(Array.isArray(out?.items) ? out.items : [])].slice(0, itemCap),
+      warnings: [...new Set([
+        ...(Array.isArray(browserCaptured?.warnings) ? browserCaptured.warnings.map(String) : []),
+        ...(Array.isArray(out?.warnings) ? out.warnings.map(String) : [])
+      ])]
+    };
   }
 
   async getLastAssistantImages({ maxImages = 6 } = {}) {

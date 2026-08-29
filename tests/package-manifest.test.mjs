@@ -18,8 +18,16 @@ test('package manifest is publishable under @agentify/desktop with npx-friendly 
   assert.equal(manifest.bin?.['agentify-desktop-gui'], 'bin/agentify-desktop.mjs');
   assert.equal(manifest.bin?.['agentify-desktop-mcp'], 'bin/agentify-desktop.mjs');
   assert.ok(manifest.files.includes('bin/'));
+  assert.ok(manifest.files.includes('bridge-runtime.mjs'));
+  assert.ok(manifest.files.includes('bridge-main.mjs'));
+  assert.ok(manifest.files.includes('bridge-http-api.mjs'));
+  assert.ok(manifest.files.includes('completion-contract.mjs'));
+  assert.ok(manifest.files.includes('run-output-cache.mjs'));
   assert.ok(manifest.files.includes('main.mjs'));
+  assert.ok(manifest.files.includes('docs/'));
   assert.ok(manifest.files.includes('mcp-server.mjs'));
+  assert.equal(manifest.scripts?.start, 'node bridge-main.mjs');
+  assert.equal(manifest.scripts?.['start:desktop'], 'electron .');
   assert.ok(manifest.files.includes('ui/'));
   assert.ok(!manifest.files.includes('tests/'));
 });

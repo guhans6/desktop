@@ -8,6 +8,8 @@ import { ensureArtifactsDir, listArtifacts, registerArtifact, artifactsRoot } fr
 import { deleteBundle, getBundle, listBundles, saveBundle } from './bundle-store.mjs';
 import { assertWithin } from './orchestrator/security.mjs';
 import { prepareQueryContext } from './context-packer.mjs';
+import { createRunRegistry } from './run-registry.mjs';
+import { normalizeChatGptMode } from './chatgpt-mode.mjs';
 
 function isLoopback(remoteAddress) {
   const a = String(remoteAddress || '');
@@ -72,6 +74,14 @@ function mapErrorToHttp(error) {
   if (msg === 'prompt_too_large') return { code: 400, body: { error: 'prompt_too_large' } };
   if (msg === 'missing_tabId') return { code: 400, body: { error: 'missing_tabId' } };
   if (msg === 'missing_key') return { code: 400, body: { error: 'missing_key' } };
+  if (msg === 'key_too_large') return { code: 400, body: { error: 'key_too_large', data: error?.data || null } };
+  if (msg === 'invalid_provider') return { code: 400, body: { error: 'invalid_provider', data: error?.data || null } };
+  if (msg === 'invalid_chatgpt_mode') return { code: 400, body: { error: 'invalid_chatgpt_mode', data: error?.data || null } };
+  if (msg === 'chatgpt_mode_unavailable') return { code: 409, body: { error: 'chatgpt_mode_unavailable', data: error?.data || null } };
+  if (msg === 'chatgpt_mode_verification_failed') return { code: 409, body: { error: 'chatgpt_mode_verification_failed', data: error?.data || null } };
+  if (msg === 'missing_runId') return { code: 400, body: { error: 'missing_runId' } };
+  if (msg === 'run_not_found') return { code: 404, body: { error: 'run_not_found', data: error?.data || null } };
+  if (msg === 'run_not_finished') return { code: 409, body: { error: 'run_not_finished', data: error?.data || null } };
   if (msg === 'tab_busy') return { code: 409, body: { error: 'tab_busy', data: error?.data || null } };
   if (msg === 'key_vendor_mismatch') return { code: 409, body: { error: 'key_vendor_mismatch' } };
   if (msg === 'tab_not_found') return { code: 404, body: { error: 'tab_not_found' } };
@@ -444,6 +454,7 @@ export function startHttpApi({
   onRuntimeChanged
 }) {
   const tokenRef = typeof token === 'string' ? { current: token } : token;
+  const runRegistry = createRunRegistry();
 
   // Governor state (per-desktop instance).
   const inflight = { queries: 0 };
@@ -533,6 +544,18 @@ export function startHttpApi({
     if (kind === 'blocked') return 'Access blocked';
     if (kind === 'ui') return 'Needs page ready';
     return 'Needs attention';
+  };
+
+  const runStateForProgress = (patch) => {
+    const blockedKind = String(patch?.blockedKind || '').trim();
+    const phase = String(patch?.phase || '').trim();
+    if (patch?.blocked && blockedKind === 'login') return 'needs_login';
+    if (patch?.blocked && blockedKind === 'captcha') return 'needs_captcha';
+    if (blockedKind === 'tool_confirmation' || phase === 'awaiting_tool_confirmation') return 'needs_tool_confirmation';
+    if (phase === 'waiting_for_response' || phase === 'working') return 'working';
+    if (['waiting_for_ready', 'typing_prompt', 'sending_prompt'].includes(phase)) return 'sending';
+    if (patch?.blocked === false && ['needs_login', 'needs_captcha'].includes(blockedKind)) return 'working';
+    return null;
   };
 
   const outcomeFromError = (error, op) => {
@@ -720,6 +743,131 @@ export function startHttpApi({
           activeQuery: activeQueries.get(tabId) || null,
           runtime: runtimeSnapshot()
         });
+      }
+
+      if (url.pathname === '/runs/status' && req.method === 'GET') {
+        const runId = String(url.searchParams.get('runId') || '').trim();
+        return sendJson(res, 200, runRegistry.status({ runId }));
+      }
+
+      if (url.pathname === '/runs/result' && req.method === 'GET') {
+        const runId = String(url.searchParams.get('runId') || '').trim();
+        return sendJson(res, 200, runRegistry.result({ runId }));
+      }
+
+      if (url.pathname === '/runs/stop' && req.method === 'POST') {
+        const body = await parseBody(req);
+        const runId = String(body.runId || '').trim();
+        const reason = String(body.reason || 'user_stop').trim() || 'user_stop';
+        return sendJson(res, 200, await runRegistry.stop({ runId, reason }));
+      }
+
+      if (url.pathname === '/runs/delegate' && req.method === 'POST') {
+        const body = await parseBody(req, { maxBytes: 500_000 });
+        const provider = String(body.provider || 'chatgpt').trim().toLowerCase() || 'chatgpt';
+        const key = String(body.key || '').trim();
+        const prompt = String(body.prompt || '');
+        if (!prompt.trim()) throw new Error('missing_prompt');
+        if (prompt.length > 200_000) throw new Error('prompt_too_large');
+        const mode = normalizeChatGptMode(body.mode ?? 'current');
+        const timeoutMs = positiveIntOr(body.timeoutMs, 10 * 60_000, 30 * 60_000);
+
+        const delegated = runRegistry.delegate({
+          provider,
+          key,
+          execute: async ({ runId, setState, setStopHandler }) => {
+            let tabId = null;
+            let countedInflight = false;
+            const op = {
+              id: runId,
+              kind: 'delegate',
+              tabId: null,
+              startedAt: Date.now(),
+              promptPreview: trimPreview(prompt),
+              source: requestSourceForBody(body),
+              phase: 'resolving_tab',
+              stopRequested: false,
+              stopRequestedAt: null,
+              blocked: false,
+              blockedKind: null,
+              scope: `key:${key}`
+            };
+
+            try {
+              const runGovernor = await getGovernor();
+              tabId = await resolveTab({
+                tabs,
+                defaultTabId,
+                body: { key, vendorId: 'chatgpt' },
+                url,
+                showTabsByDefault: runGovernor.showTabsByDefault,
+                createIfMissing: true,
+                vendors
+              });
+              assertTabNotBusy(tabId);
+              op.tabId = tabId;
+              setActiveQuery(tabId, op);
+              checkAndConsumeQueryBudget({ tabId, governor: runGovernor });
+              inflight.queries += 1;
+              countedInflight = true;
+
+              const controller = tabs.getControllerById(tabId);
+              await setStopHandler(async ({ reason }) => {
+                if (typeof controller?.requestStop !== 'function') return { ok: true, requested: false, clicked: false };
+                return await controller.requestStop({ reason });
+              });
+              setState('sending');
+              const { selection, response } = await runExclusive(controller, async () => {
+                const selection = typeof controller?.selectMode === 'function'
+                  ? await controller.selectMode({ mode, timeoutMs: Math.min(timeoutMs, 5_000) })
+                  : mode === 'current'
+                    ? { requested: 'current', observed: null, verified: true, changed: false }
+                    : (() => {
+                        const error = new Error('chatgpt_mode_unavailable');
+                        error.data = { requested: mode, reason: 'controller_mode_adapter_unavailable' };
+                        throw error;
+                      })();
+                const response = await controller.query({
+                  prompt,
+                  attachments: [],
+                  timeoutMs,
+                  onProgress: (patch) => {
+                    patchActiveQuery(tabId, patch);
+                    const nextState = runStateForProgress(patch);
+                    if (nextState) setState(nextState);
+                  }
+                });
+                return { selection, response };
+              });
+
+              setLastOutcome(tabId, {
+                status: 'success',
+                label: 'Response received',
+                detail: response?.text ? trimPreview(response.text, 180) : 'ChatGPT returned a response.',
+                source: op.source,
+                kind: 'delegate',
+                finishedAt: Date.now(),
+                durationMs: Math.max(0, Date.now() - op.startedAt)
+              });
+
+              return {
+                rawResponse: String(response?.text || ''),
+                completion: null,
+                selection,
+                artifacts: [],
+                warnings: []
+              };
+            } catch (error) {
+              if (tabId) setLastOutcome(tabId, outcomeFromError(error, op));
+              throw error;
+            } finally {
+              if (tabId) clearActiveQuery(tabId, runId);
+              if (countedInflight) inflight.queries = Math.max(0, inflight.queries - 1);
+            }
+          }
+        });
+
+        return sendJson(res, 200, delegated);
       }
 
       if (url.pathname === '/show' && req.method === 'POST') {

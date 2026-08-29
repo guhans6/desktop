@@ -1,0 +1,43 @@
+# Web LLM Bridge Stage 1 Handoff
+
+## Current state
+
+This fork is established as the temporary Stage 1 source-donor workspace. Source behavior remains at Agentify v0.2.4 while the documentation is being aligned to the approved ChatGPT-first v1 plan in `web-llm-bridge-chatgpt-v1-plan.md`.
+
+The v1 goal is a stable ChatGPT conversation that accepts delegated prompts, verifies a constrained ChatGPT mode selection, lets ChatGPT use the user's established Code MCP integration for approved local/project work, finalizes the exact assistant turn for each run, and returns raw response/completion metadata plus bounded ChatGPT-generated output files.
+
+Claude and other existing provider implementations are not v1 targets. They may remain internally as stale last-known-working code unless shared infrastructure requires changes. Gemini may follow after the ChatGPT path is proven.
+
+## Guardrails for the next changes
+
+1. Preserve the local capability boundary: Code MCP owns project and system operations.
+2. Distinguish stable conversation `key` from unique delegation `runId`; serialize active runs per key.
+3. Keep Chrome CDP isolation, readiness states, conservative pacing, and run-scoped stop support.
+4. Do not expose caller-local attachments, arbitrary paths, context packing, bundles, generic uploads, artifact ingestion, watch folders, arbitrary navigation, generic authenticated-page reading, or arbitrary JavaScript execution.
+5. Permit only provider-originated output capture from the exact assistant turn correlated to a run, into a private bounded bridge-owned per-run cache.
+6. Keep login, CAPTCHA, and consequential tool confirmations as manual handoffs.
+7. Treat provider transport completion, completion-contract parsing, and caller acceptance as distinct.
+8. Keep public-surface narrowing, reliability changes, output capture, and later internal deletion as separate reviewable changes.
+9. Do not begin broad source deletion before the signed-in ChatGPT -> Code MCP -> caller proof succeeds.
+
+## Immediate frontier
+
+1. Treat GitHub issue #9, the live signed-in ChatGPT compatibility gate, as the immediate priority before further UI-dependent implementation.
+2. Launch the bridge with its isolated provider profile and establish manual ChatGPT sign-in or verify truthful `needs_login` behavior.
+3. Prove one harmless real delegation end to end: exactly one user turn, current mode selection or explicit rejection, exact following assistant turn, and returned raw result.
+4. Use any live UI mismatch as the next implementation bug, add regression coverage for the observed behavior, and rerun the live smoke test before continuing output capture or public-surface work.
+
+GitHub Issues in `guhans6/desktop` are the authoritative work tracker. Issues #1–#10 mirror the original local ticket sequence. The files under `.scratch/chatgpt-first-v1/issues/` are retained only as the migration archive and should not be treated as the primary tracker.
+
+## Caller integration
+
+Codex or Visual Companion should use the run-level bridge interface:
+
+```text
+delegate({ provider: "chatgpt", key, prompt, mode, outputPolicy }) -> { runId, key, state }
+status({ runId }) -> run state
+result({ runId }) -> rawResponse, completion, selection, artifacts, warnings
+stop({ runId })
+```
+
+The caller should not automate provider DOMs directly and does not need to understand Code MCP internals.

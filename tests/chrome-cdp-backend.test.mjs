@@ -4,7 +4,15 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-import { ChromeCdpBrowserBackend, ChromeCdpConnection, chromeSpawnOptions } from '../chrome-cdp-backend.mjs';
+import {
+  ChromeCdpBrowserBackend,
+  ChromeCdpConnection,
+  chromeSpawnOptions,
+  looksLikeGenericDownloadControlLabel,
+  looksLikeProviderFileControlLabel,
+  preferredProviderDownloadName,
+  providerDownloadMatches
+} from '../chrome-cdp-backend.mjs';
 
 class MockWebSocket {
   constructor() {
@@ -82,6 +90,35 @@ test('chrome-cdp-backend: pending commands reject when websocket closes', async 
   ws.close();
 
   await assert.rejects(async () => await pending, /chrome_cdp_disconnected/);
+});
+
+test('chrome-cdp-backend: exact-turn file controls recognize generated filenames without matching unrelated buttons', () => {
+  assert.equal(looksLikeProviderFileControlLabel('bridge-check-note.txt'), true);
+  assert.equal(looksLikeProviderFileControlLabel('Download file'), true);
+  assert.equal(looksLikeProviderFileControlLabel('report.pdf'), true);
+  assert.equal(looksLikeProviderFileControlLabel('Coding Citation'), false);
+  assert.equal(looksLikeProviderFileControlLabel('Copy'), false);
+});
+
+test('chrome-cdp-backend: preview fallback recognizes generic Download controls only', () => {
+  assert.equal(looksLikeGenericDownloadControlLabel('Download'), true);
+  assert.equal(looksLikeGenericDownloadControlLabel('Download file'), true);
+  assert.equal(looksLikeGenericDownloadControlLabel('bridge-check-note.txt'), false);
+  assert.equal(looksLikeGenericDownloadControlLabel('Coding Citation'), false);
+});
+
+test('chrome-cdp-backend: exact-turn filename wins over a collision-suffixed browser suggestion', () => {
+  assert.equal(preferredProviderDownloadName('bridge-check-note.txt', 'bridge-check-note(4).txt'), 'bridge-check-note.txt');
+  assert.equal(preferredProviderDownloadName('Attach bridge-check-note.txt', 'bridge-check-note(5).txt'), 'bridge-check-note.txt');
+  assert.equal(preferredProviderDownloadName('Download file', 'report.pdf'), 'report.pdf');
+  assert.equal(preferredProviderDownloadName('', ''), null);
+});
+
+test('chrome-cdp-backend: provider download events must match the exact-turn filename', () => {
+  assert.equal(providerDownloadMatches(['bridge-check-note.txt'], 'bridge-check-note.txt'), true);
+  assert.equal(providerDownloadMatches(['bridge-check-note.txt'], 'bridge-check-note(4).txt'), true);
+  assert.equal(providerDownloadMatches(['bridge-check-note.txt'], 'unrelated-report.pdf'), false);
+  assert.equal(providerDownloadMatches([], 'bridge-check-note.txt'), false);
 });
 
 test('chrome-cdp-backend: Chrome spawn does not use shell on any platform', () => {
