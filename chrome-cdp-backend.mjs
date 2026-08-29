@@ -534,6 +534,41 @@ class ChromeCdpPageAdapter {
             return button ? 1 : 0;
           })()`);
           await sleep(Number(clickedFallback) > 0 ? 350 : 100);
+          if (Number(clickedFallback) > 0 && downloads.size === 0) {
+            const target = await this.evaluate(`(() => {
+              const marker = 'data-web-llm-bridge-preexisting-download';
+              const visible = (node) => {
+                const rect = node?.getBoundingClientRect?.();
+                return !!rect && rect.width > 0 && rect.height > 0;
+              };
+              const button = Array.from(document.querySelectorAll('button'))
+                .filter(visible)
+                .filter((node) => !node.hasAttribute(marker))
+                .find((node) => {
+                  const label = [node.getAttribute('aria-label'), node.getAttribute('title'), node.textContent]
+                    .filter(Boolean)
+                    .join(' ')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+                  return ${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label);
+                });
+              if (!button) return null;
+              const rect = button.getBoundingClientRect();
+              return {
+                x: rect.x + rect.width / 2,
+                y: rect.y + rect.height / 2,
+                width: rect.width,
+                height: rect.height
+              };
+            })()`);
+            if (target?.width > 0 && target?.height > 0) {
+              await this.moveMouse(target.x, target.y);
+              await this.mouseDown(target.x, target.y, { button: 'left', clickCount: 1 });
+              await sleep(30);
+              await this.mouseUp(target.x, target.y, { button: 'left', clickCount: 1 });
+              await sleep(150);
+            }
+          }
         }
       }
       await this.evaluate(`(() => {
