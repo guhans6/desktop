@@ -4,7 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
-import { ChromeCdpBrowserBackend, ChromeCdpConnection, chromeSpawnOptions, looksLikeProviderFileControlLabel } from '../chrome-cdp-backend.mjs';
+import {
+  ChromeCdpBrowserBackend,
+  ChromeCdpConnection,
+  chromeSpawnOptions,
+  looksLikeGenericDownloadControlLabel,
+  looksLikeProviderFileControlLabel
+} from '../chrome-cdp-backend.mjs';
 
 class MockWebSocket {
   constructor() {
@@ -90,6 +96,13 @@ test('chrome-cdp-backend: exact-turn file controls recognize generated filenames
   assert.equal(looksLikeProviderFileControlLabel('report.pdf'), true);
   assert.equal(looksLikeProviderFileControlLabel('Coding Citation'), false);
   assert.equal(looksLikeProviderFileControlLabel('Copy'), false);
+});
+
+test('chrome-cdp-backend: preview fallback recognizes generic Download controls only', () => {
+  assert.equal(looksLikeGenericDownloadControlLabel('Download'), true);
+  assert.equal(looksLikeGenericDownloadControlLabel('Download file'), true);
+  assert.equal(looksLikeGenericDownloadControlLabel('bridge-check-note.txt'), false);
+  assert.equal(looksLikeGenericDownloadControlLabel('Coding Citation'), false);
 });
 
 test('chrome-cdp-backend: Chrome spawn does not use shell on any platform', () => {

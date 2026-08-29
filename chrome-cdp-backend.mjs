@@ -13,6 +13,12 @@ export function looksLikeProviderFileControlLabel(value) {
   return PROVIDER_FILE_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
 }
 
+const GENERIC_DOWNLOAD_CONTROL_PATTERN = /^download(?:\s|$)/i;
+
+export function looksLikeGenericDownloadControlLabel(value) {
+  return GENERIC_DOWNLOAD_CONTROL_PATTERN.test(String(value || '').replace(/\s+/g, ' ').trim());
+}
+
 function modifierMask(modifiers = []) {
   let mask = 0;
   for (const modifier of modifiers) {
@@ -481,8 +487,13 @@ class ChromeCdpPageAdapter {
           const rect = node?.getBoundingClientRect?.();
           return !!rect && rect.width > 0 && rect.height > 0;
         };
-        for (const button of Array.from(document.querySelectorAll('button[aria-label="Download file"], button[aria-label="Download"]')).filter(visible)) {
-          button.setAttribute(marker, '1');
+        for (const button of Array.from(document.querySelectorAll('button')).filter(visible)) {
+          const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\\s+/g, ' ')
+            .trim();
+          if (${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label)) button.setAttribute(marker, '1');
         }
         const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
         const root = roots[${turnIndex}] || null;
@@ -498,22 +509,38 @@ class ChromeCdpPageAdapter {
         for (const button of buttons.slice(0, ${itemCap})) button.click();
         return buttons.length;
       })()`);
-      await sleep(150);
+      if (Number(triggerCount) > 0) {
+        const fallbackStartedAt = Date.now();
+        while (Date.now() - fallbackStartedAt < Math.min(waitMs, 2_500) && downloads.size === 0) {
+          const clickedFallback = await this.evaluate(`(() => {
+            const marker = 'data-web-llm-bridge-preexisting-download';
+            const visible = (node) => {
+              const rect = node?.getBoundingClientRect?.();
+              return !!rect && rect.width > 0 && rect.height > 0;
+            };
+            const buttons = Array.from(document.querySelectorAll('button'))
+              .filter(visible)
+              .filter((button) => !button.hasAttribute(marker))
+              .filter((button) => {
+                const label = [button.getAttribute('aria-label'), button.getAttribute('title'), button.textContent]
+                  .filter(Boolean)
+                  .join(' ')
+                  .replace(/\\s+/g, ' ')
+                  .trim();
+                return ${GENERIC_DOWNLOAD_CONTROL_PATTERN}.test(label);
+              });
+            for (const button of buttons.slice(0, ${itemCap})) {
+              button.setAttribute(marker, '1');
+              button.click();
+            }
+            return buttons.length;
+          })()`);
+          await sleep(Number(clickedFallback) > 0 ? 150 : 100);
+        }
+      }
       await this.evaluate(`(() => {
-        const marker = 'data-web-llm-bridge-preexisting-download';
-        const visible = (node) => {
-          const rect = node?.getBoundingClientRect?.();
-          return !!rect && rect.width > 0 && rect.height > 0;
-        };
-        const buttons = Number(${JSON.stringify(Number(triggerCount) || 0)}) > 0
-          ? Array.from(document.querySelectorAll('button[aria-label="Download file"], button[aria-label="Download"]'))
-            .filter(visible)
-            .filter((button) => !button.hasAttribute(marker))
-          : [];
-        for (const button of buttons.slice(0, ${itemCap})) button.click();
-        for (const button of document.querySelectorAll('[data-web-llm-bridge-preexisting-download]')) button.removeAttribute(marker);
-        return buttons.length;
-      })()`);
+        for (const button of document.querySelectorAll('[data-web-llm-bridge-preexisting-download]')) button.removeAttribute('data-web-llm-bridge-preexisting-download');
+      })()`).catch(() => {});
 
       const startedAt = Date.now();
       while (Date.now() - startedAt < waitMs && ![...downloads.values()].some((item) => item.state === 'completed')) {
