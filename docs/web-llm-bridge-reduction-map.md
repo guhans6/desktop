@@ -21,6 +21,8 @@ Agentify is a Stage 1 source donor. This map determines the staged reduction ord
 | `shutdown.mjs` | keep | controlled teardown |
 | `ui/` | keep minimally | ChatGPT login/profile/session and manual attention management |
 
+Issue #11 changes the normal runtime boundary: `bridge-main.mjs` / `bridge-runtime.mjs` now own Node + Chrome-CDP provider-session startup without Electron. `bridge-http-api.mjs` limits normal startup to the protected default ChatGPT session and run transport instead of inheriting the desktop API's navigation, filesystem, artifact, tab, and watch-folder routes. The inherited Electron shell remains only as an explicit compatibility fallback (`npm run start:desktop`) pending separate cleanup; it is not required for normal bridge operation.
+
 ## Remove from the public bridge surface
 
 ```text

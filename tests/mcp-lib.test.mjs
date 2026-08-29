@@ -105,7 +105,7 @@ test('mcp-lib: ensureDesktopRunning spawns if serverId mismatches and then recov
   assert.equal(conn.serverId, 'sid-new');
 });
 
-test('mcp-lib: Windows spawn uses Node-hosted Electron CLI without shell', async () => {
+test('mcp-lib: auto-start uses the Node headless bridge entry without shell', async () => {
   const dir = await tempDir();
   const token = 't';
   await ensureToken(dir);
@@ -119,7 +119,6 @@ test('mcp-lib: Windows spawn uses Node-hosted Electron CLI without shell', async
   const conn = await ensureDesktopRunning({
     stateDir: dir,
     fetchImpl: makeFetch({ getServerId: () => fetchServerId, acceptToken: token }),
-    platform: 'win32',
     spawnImpl: (cmd, args, opts) => {
       spawnedCmd = cmd;
       spawnedArgs = args;
@@ -133,12 +132,11 @@ test('mcp-lib: Windows spawn uses Node-hosted Electron CLI without shell', async
   assert.equal(conn.serverId, 'sid-new');
   const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   assert.equal(spawnedCmd, process.execPath);
-  assert.equal(spawnedArgs?.[0], path.join(packageRoot, 'node_modules', 'electron', 'cli.js'));
-  assert.equal(spawnedArgs?.[1], path.join(packageRoot, 'main.mjs'));
+  assert.deepEqual(spawnedArgs, [path.join(packageRoot, 'bridge-main.mjs')]);
   assert.equal(spawnShell, false);
 });
 
-test('mcp-lib: ensureDesktopRunning resolves bundled electron relative to desktop package, not cwd', async () => {
+test('mcp-lib: ensureDesktopRunning resolves headless entry relative to package, not cwd', async () => {
   const dir = await tempDir();
   const token = 't';
   await ensureToken(dir);
@@ -166,8 +164,7 @@ test('mcp-lib: ensureDesktopRunning resolves bundled electron relative to deskto
     assert.equal(path.isAbsolute(spawnedCmd), true);
     const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
     assert.equal(spawnedCmd, process.execPath);
-    assert.equal(spawnedArgs?.[0], path.join(packageRoot, 'node_modules', 'electron', 'cli.js'));
-    assert.equal(spawnedArgs?.[1], path.join(packageRoot, 'main.mjs'));
+    assert.deepEqual(spawnedArgs, [path.join(packageRoot, 'bridge-main.mjs')]);
   } finally {
     process.chdir(originalCwd);
   }
