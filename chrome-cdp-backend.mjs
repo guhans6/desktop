@@ -469,7 +469,15 @@ class ChromeCdpPageAdapter {
         downloadPath: stagingDir,
         eventsEnabled: true
       });
-      await this.evaluate(`(() => {
+      const triggerCount = await this.evaluate(`(() => {
+        const marker = 'data-web-llm-bridge-preexisting-download';
+        const visible = (node) => {
+          const rect = node?.getBoundingClientRect?.();
+          return !!rect && rect.width > 0 && rect.height > 0;
+        };
+        for (const button of Array.from(document.querySelectorAll('button[aria-label="Download file"], button[aria-label="Download"]')).filter(visible)) {
+          button.setAttribute(marker, '1');
+        }
         const roots = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
         const root = roots[${turnIndex}] || null;
         if (!root) return 0;
@@ -479,12 +487,18 @@ class ChromeCdpPageAdapter {
       })()`);
       await sleep(150);
       await this.evaluate(`(() => {
+        const marker = 'data-web-llm-bridge-preexisting-download';
         const visible = (node) => {
           const rect = node?.getBoundingClientRect?.();
           return !!rect && rect.width > 0 && rect.height > 0;
         };
-        const buttons = Array.from(document.querySelectorAll('button[aria-label="Download file"], button[aria-label="Download"]')).filter(visible);
+        const buttons = Number(${JSON.stringify(Number(triggerCount) || 0)}) > 0
+          ? Array.from(document.querySelectorAll('button[aria-label="Download file"], button[aria-label="Download"]'))
+            .filter(visible)
+            .filter((button) => !button.hasAttribute(marker))
+          : [];
         for (const button of buttons.slice(0, ${itemCap})) button.click();
+        for (const button of document.querySelectorAll(`[${marker}]`)) button.removeAttribute(marker);
         return buttons.length;
       })()`);
 
