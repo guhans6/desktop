@@ -10,7 +10,9 @@ Active generation, login, CAPTCHA, and tool-confirmation states are not completi
 
 ## Versioned final block
 
-Delegated ChatGPT prompts should require a versioned final machine-readable block with an unambiguous sentinel, for example:
+The start/end lines below are protocol delimiters, not encoding. They make the optional metadata footer unambiguous to a deterministic parser; they are not evidence that the provider task itself succeeded. See `web-llm-bridge-testing.md` for the separation between synthetic protocol fixtures and natural live-provider verification.
+
+When a caller needs structured completion metadata, it may ask the assistant to finish with a versioned machine-readable block using unambiguous sentinels, for example:
 
 ```text
 WEB_LLM_BRIDGE_COMPLETION_V1

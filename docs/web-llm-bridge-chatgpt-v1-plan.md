@@ -70,7 +70,7 @@ Login, CAPTCHA, and Code MCP write/tool confirmations remain human handoffs. The
 
 ## Completion contract
 
-A successful provider transport is distinct from successful completion-contract parsing and from caller acceptance. Delegated prompts should require a versioned final completion block. The bridge returns the raw assistant response even when parsing fails.
+A successful provider transport is distinct from successful completion-contract parsing and from caller acceptance. Callers may request a versioned final completion block when they need structured completion metadata. The bridge returns the raw assistant response even when that block is absent or parsing fails.
 
 A missing or malformed completion block on an otherwise finalized assistant turn produces a completed transport result with `completion: null` and a warning such as `completion_contract_missing` or `completion_contract_invalid`; it does not rewrite transport completion into a generic failure.
 
@@ -90,6 +90,10 @@ Output capture must satisfy all of the following:
 - return cache paths and metadata, not cookies, credentials, or persisted signed source URLs;
 - never accept a caller-specified output directory or input file path.
 
+## Verification style
+
+Live provider verification must use ordinary human-style tasks and independently observe the properties under test. Do not use opaque exact-reply markers or ask ChatGPT to state that mode verification, turn correlation, output capture, permissions, or hashes succeeded. Synthetic completion sentinels remain appropriate in parser/integration fixtures where the protocol format itself is under test. See `web-llm-bridge-testing.md`.
+
 ## Execution sequence
 
 1. **Documentation boundary correction.** Replace the blanket artifact prohibition with the bounded provider-originated output policy and record this complete plan. No source deletion.
@@ -100,7 +104,7 @@ Output capture must satisfy all of the following:
 6. **ChatGPT mode adapter.** Add the constrained mode enum, picker interaction, verification, and explicit unavailable/incompatible errors.
 7. **Completion parsing and provider-output capture.** Add versioned completion parsing plus private per-run browser-session-aware artifact capture with limits, hashes, permissions, and TTL cleanup.
 8. **ChatGPT-only public surface.** Expose `delegate`, `status`, `result`, and `stop` with `provider: "chatgpt"`; stop advertising current generic/local-capability tools without broadly deleting stale provider implementations.
-9. **Signed-in end-to-end proof.** Prove ChatGPT selection -> prompt -> Code MCP work -> finalized assistant turn -> completion parse -> generated temporary file capture -> caller result.
+9. **Signed-in end-to-end proof.** Use a normal human-style task to prove ChatGPT selection -> one accepted prompt -> finalized following assistant turn -> real provider-generated temporary file capture -> caller result. Verify completion parsing separately with deterministic protocol/integration tests; do not make the live assistant self-report the transport properties being measured.
 10. **Post-proof reduction.** Only after the end-to-end proof, incrementally delete now-unreachable context packing, upload, watch-folder, arbitrary navigation/read, generic artifact-ingestion, and other obsolete implementation paths.
 
 Public-surface narrowing and internal module deletion remain separate changes. Every source slice must have focused tests and should remain independently reviewable.

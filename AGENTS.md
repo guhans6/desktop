@@ -20,3 +20,4 @@ The present Stage 1 baseline is documentation only. Preserve MPL-2.0 notices and
 - Preserve stable provider-session keys and conservative rate/stop behavior.
 - Keep login and CAPTCHA resolution as a manual handoff; never add bypass behavior.
 - Treat provider generation completion as distinct from task acceptance. Return raw text plus parsed completion metadata.
+- Use ordinary human-style prompts for behavioral and signed-in live verification. Keep synthetic sentinels/markers only in protocol fixtures where that format is itself under test, and never count the provider's self-reported success claims as verification evidence.

@@ -60,19 +60,19 @@ test('bridge HTTP API is ChatGPT-default-only and rejects inherited desktop rout
   }
 
   const invalidTab = await request(port, '/runs/delegate', {
-    method: 'POST', token, body: { provider: 'chatgpt', key: 'not-default', prompt: 'x' }
+    method: 'POST', token, body: { provider: 'chatgpt', key: 'not-default', prompt: 'Please summarize the current bridge status.' }
   });
   assert.equal(invalidTab.status, 400);
   assert.equal(invalidTab.body.error, 'invalid_bridge_tab');
 
   const invalidOutputPolicy = await request(port, '/runs/delegate', {
-    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'x', outputPolicy: 'path' }
+    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'Please summarize the current bridge status.', outputPolicy: 'path' }
   });
   assert.equal(invalidOutputPolicy.status, 400);
   assert.equal(invalidOutputPolicy.body.error, 'invalid_output_policy');
 
   const delegated = await request(port, '/runs/delegate', {
-    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'x', mode: 'current' }
+    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'Please summarize the current bridge status.', mode: 'current' }
   });
   assert.equal(delegated.status, 200);
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -88,7 +88,7 @@ test('bridge HTTP API is ChatGPT-default-only and rejects inherited desktop rout
   }
   assert.equal(result.status, 200);
   assert.equal(result.body.state, 'completed');
-  assert.equal(result.body.result.rawResponse, 'response:x');
+  assert.equal(result.body.result.rawResponse, 'response:Please summarize the current bridge status.');
   assert.equal(result.body.result.completion, null);
   assert.deepEqual(result.body.result.warnings, ['completion_contract_missing']);
   assert.equal(result.body.result.selection.verified, true);
@@ -102,7 +102,7 @@ test('bridge HTTP API preserves final completion metadata and caches only exact-
     'The requested output is ready.',
     '',
     'WEB_LLM_BRIDGE_COMPLETION_V1',
-    '{"bridge_status":"completed","summary":"done","verification":["test"],"remaining":[],"needs_human":false}',
+    '{"bridge_status":"completed","summary":"Created the requested text note.","verification":["HTTP integration fixture"],"remaining":[],"needs_human":false}',
     'END_WEB_LLM_BRIDGE_COMPLETION_V1'
   ].join('\n');
   const controller = {
@@ -134,7 +134,7 @@ test('bridge HTTP API preserves final completion metadata and caches only exact-
   const port = server.address().port;
 
   const delegated = await request(port, '/runs/delegate', {
-    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'capture this', outputPolicy: 'capture' }
+    method: 'POST', token, body: { provider: 'chatgpt', key: 'default', prompt: 'Please create a small text note and attach it to your reply.', outputPolicy: 'capture' }
   });
   assert.equal(delegated.status, 200);
   let result;
@@ -148,8 +148,8 @@ test('bridge HTTP API preserves final completion metadata and caches only exact-
   assert.deepEqual(result.body.result.completion, {
     version: 1,
     bridge_status: 'completed',
-    summary: 'done',
-    verification: ['test'],
+    summary: 'Created the requested text note.',
+    verification: ['HTTP integration fixture'],
     remaining: [],
     needs_human: false
   });
@@ -170,7 +170,7 @@ test('bridge HTTP API retains a completed response when optional provider-output
     async detectChallenge() { return { blocked: false, promptVisible: true, kind: null, indicators: null }; },
     async requestStop() { return { ok: true }; },
     async selectMode({ mode }) { return { requested: mode, observed: { mode: 'medium', label: 'Medium', source: 'picker' }, verified: true, changed: false }; },
-    async query() { return { text: 'provider completed', meta: { assistantTurnIndex: 2 } }; },
+    async query() { return { text: 'I finished the request.', meta: { assistantTurnIndex: 2 } }; },
     async captureAssistantOutputs() { throw new Error('download_failed'); }
   };
   const defaultTab = { id: 'default-tab', key: 'default', protectedTab: true, vendorId: 'chatgpt', vendorName: 'ChatGPT' };
@@ -178,7 +178,7 @@ test('bridge HTTP API retains a completed response when optional provider-output
   const server = await startBridgeHttpApi({ port: 0, token, tabs, defaultTabId: defaultTab.id, stateDir });
   t.after(() => server.close());
   const delegated = await request(server.address().port, '/runs/delegate', {
-    method: 'POST', token, body: { prompt: 'capture this', outputPolicy: 'capture' }
+    method: 'POST', token, body: { prompt: 'Please create a small text note and attach it to your reply.', outputPolicy: 'capture' }
   });
   let result;
   for (let attempt = 0; attempt < 20; attempt += 1) {
@@ -188,7 +188,7 @@ test('bridge HTTP API retains a completed response when optional provider-output
   }
   assert.equal(result.status, 200);
   assert.equal(result.body.state, 'completed');
-  assert.equal(result.body.result.rawResponse, 'provider completed');
+  assert.equal(result.body.result.rawResponse, 'I finished the request.');
   assert.deepEqual(result.body.result.artifacts, []);
   assert.deepEqual(result.body.result.warnings, ['completion_contract_missing', 'artifact_capture_failed']);
 });

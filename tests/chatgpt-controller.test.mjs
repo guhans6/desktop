@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { ChatGPTController } from '../chatgpt-controller.mjs';
 import { chatGptLabelMatches, classifyChatGptModeLabel, observedChatGptMode } from '../chatgpt-mode.mjs';
 
+const HUMAN_PROMPT = 'Please summarize this.';
+
 function readyState() {
   return {
     url: 'https://chatgpt.com/',
@@ -289,7 +291,7 @@ test('chatgpt-controller: send falls back to requestSubmit on the active compose
     }
   });
 
-  const result = await controller.send({ text: 'agentify', timeoutMs: 5_000 });
+  const result = await controller.send({ text: HUMAN_PROMPT, timeoutMs: 5_000 });
   assert.deepEqual(result, { ok: true });
   assert.equal(events.includes('requestSubmit'), true);
   assert.equal(events.includes('key:Enter'), false);
@@ -399,7 +401,7 @@ test('chatgpt-controller: a newly accepted ChatGPT user turn prevents fallback r
     }
   });
 
-  const result = await controller.send({ text: 'agentify', timeoutMs: 5_000 });
+  const result = await controller.send({ text: HUMAN_PROMPT, timeoutMs: 5_000 });
   assert.deepEqual(result, { ok: true });
   assert.equal(turnStateReads >= 2, true);
   assert.equal(events.includes('requestSubmit'), false);
@@ -456,7 +458,7 @@ test('chatgpt-controller: ChatGPT direct send-button click is attempted before h
     }
   });
 
-  const result = await controller.send({ text: 'agentify', timeoutMs: 5_000 });
+  const result = await controller.send({ text: HUMAN_PROMPT, timeoutMs: 5_000 });
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(events, ['mouseDown', 'directClick']);
   assert.equal(events.filter((event) => event === 'mouseDown').length, 1);
@@ -504,7 +506,7 @@ test('chatgpt-controller: send fails closed when more than one new ChatGPT user 
   });
 
   await assert.rejects(
-    () => controller.send({ text: 'agentify', timeoutMs: 5_000 }),
+    () => controller.send({ text: HUMAN_PROMPT, timeoutMs: 5_000 }),
     (error) => error?.message === 'duplicate_user_turn_detected' && error?.data?.baselineUserCount === 2 && error?.data?.currentUserCount === 4
   );
 });
@@ -570,7 +572,7 @@ test('chatgpt-controller: query waits for the assistant turn following the newly
     }
   });
 
-  const result = await controller.query({ prompt: 'agentify', timeoutMs: 8_000 });
+  const result = await controller.query({ prompt: HUMAN_PROMPT, timeoutMs: 8_000 });
   assert.equal(result.text, 'new answer');
   assert.equal(result.meta.count, 2);
   assert.equal(responsePolls >= 5, true);
@@ -635,7 +637,7 @@ test('chatgpt-controller: query does not finalize a transient correlated ChatGPT
     }
   });
 
-  const result = await controller.query({ prompt: 'agentify', timeoutMs: 8_000 });
+  const result = await controller.query({ prompt: HUMAN_PROMPT, timeoutMs: 8_000 });
   assert.equal(result.text, 'final answer');
   assert.equal(responsePolls >= 5, true);
 });
@@ -699,7 +701,7 @@ test('chatgpt-controller: query waits for finished-turn actions before finalizin
     }
   });
 
-  const result = await controller.query({ prompt: 'agentify', timeoutMs: 8_000 });
+  const result = await controller.query({ prompt: HUMAN_PROMPT, timeoutMs: 8_000 });
   assert.equal(result.text, 'complete answer');
   assert.equal(responsePolls >= 5, true);
 });
